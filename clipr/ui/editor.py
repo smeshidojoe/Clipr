@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QMouseEvent, QPainter, QPen
+from PySide6.QtCore import (
+    QAbstractAnimation, QPointF, QRect, QRectF, QSize, QSizeF, Qt, QTimer, QUrl,
+    QVariantAnimation, Signal,
+)
+from PySide6.QtGui import (
+    QColor, QDesktopServices, QFont, QIcon, QKeySequence, QMouseEvent, QPainter,
+    QPen, QShortcut,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
@@ -17,14 +23,15 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QProgressBar,
-    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from ..ffmpeg import GifExporter, Region, probe
-from . import theme
+from . import motion, theme
+from .icons import glyph
+from .widgets import PressButton
 
 HANDLE = 9.0  # px grab radius for crop handles
 MIN_CROP = 24.0
@@ -250,13 +257,14 @@ class Timeline(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(52)
+        self.setFixedHeight(44)
         self.setMouseTracking(True)
         self._duration = 0.0
         self._start = 0.0
         self._end = 0.0
         self._playhead = 0.0
         self._drag: str | None = None
+        self._hot: str | None = None      # ручка под курсором
 
     def set_duration(self, seconds: float) -> None:
         self._duration = max(seconds, 0.001)
@@ -275,7 +283,11 @@ class Timeline(QWidget):
         return self._start, self._end
 
     def _track(self):
-        return self.rect().adjusted(10, 14, -10, -14)
+        # Тонкая дорожка вместо толстой полосы: таймлайн — это шкала, а не
+        # главный объект окна; заливка во всю высоту перетягивала на себя
+        # внимание с предпросмотра.
+        centre = self.rect().center().y()
+        return QRect(12, centre - 4, max(self.width() - 24, 1), 8)
 
     def _to_x(self, seconds: float) -> float:
         track = self._track()
@@ -304,8 +316,15 @@ class Timeline(QWidget):
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._drag is None:
             x = event.position().x()
-            near = min(abs(x - self._to_x(self._start)), abs(x - self._to_x(self._end))) < 12
-            self.setCursor(Qt.SizeHorCursor if near else Qt.PointingHandCursor)
+            to_start = abs(x - self._to_x(self._start))
+            to_end = abs(x - self._to_x(self._end))
+            hot = None
+            if min(to_start, to_end) < 12:
+                hot = "start" if to_start <= to_end else "end"
+            if hot != self._hot:
+                self._hot = hot           # подсветка ручки: без неё непонятно,
+                self.update()             # что маркер вообще берётся мышью
+            self.setCursor(Qt.SizeHorCursor if hot else Qt.PointingHandCursor)
             return
         value = self._to_time(event.position().x())
         if self._drag == "start":
@@ -321,6 +340,12 @@ class Timeline(QWidget):
 
     def mouseReleaseEvent(self, _event: QMouseEvent) -> None:
         self._drag = None
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self._hot = None
+        self.update()
 
     def paintEvent(self, _event) -> None:
         if self._duration <= 0:
@@ -328,26 +353,35 @@ class Timeline(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         track = self._track()
+        radius = track.height() / 2.0
 
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(255, 255, 255, 22))
-        painter.drawRoundedRect(track, 7, 7)
+        painter.setBrush(QColor(255, 255, 255, 20))
+        painter.drawRoundedRect(QRectF(track), radius, radius)
 
-        selected = track.adjusted(0, 0, 0, 0)
-        selected.setLeft(int(self._to_x(self._start)))
-        selected.setRight(int(self._to_x(self._end)))
-        painter.setBrush(QColor(theme.ACCENT).darker(160))
-        painter.drawRoundedRect(selected, 7, 7)
+        selected = QRectF(track)
+        selected.setLeft(self._to_x(self._start))
+        selected.setRight(self._to_x(self._end))
+        accent = QColor(theme.ACCENT)
+        accent.setAlpha(190)
+        painter.setBrush(accent)
+        painter.drawRoundedRect(selected, radius, radius)
 
-        painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
-        head = self._to_x(self._playhead)
-        painter.drawLine(QPointF(head, track.top() - 4), QPointF(head, track.bottom() + 4))
-
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(theme.ACCENT))
-        for seconds in (self._start, self._end):
+        for name, seconds in (("start", self._start), ("end", self._end)):
+            active = self._drag == name or (self._drag is None and self._hot == name)
             x = self._to_x(seconds)
-            painter.drawRoundedRect(QRectF(x - 4, track.top() - 5, 8, track.height() + 10), 4, 4)
+            # Схваченная ручка заметно толстеет и белеет: отдача на нажатие,
+            # а не только смена курсора.
+            half = 5.0 if active else 3.5
+            grow = 9.0 if active else 6.0
+            painter.setBrush(QColor("#FFFFFF") if self._drag == name else QColor(theme.ACCENT))
+            painter.drawRoundedRect(
+                QRectF(x - half, track.top() - grow, half * 2, track.height() + grow * 2),
+                half, half)
+
+        head = self._to_x(self._playhead)
+        painter.setPen(QPen(QColor(255, 255, 255, 220), 2))
+        painter.drawLine(QPointF(head, track.top() - 3), QPointF(head, track.bottom() + 3))
 
 
 def _format_time(seconds: float) -> str:
@@ -368,7 +402,10 @@ class EditorWindow(QWidget):
         self.settings = settings
         self.video_path = Path(video_path)
         self.exporter: GifExporter | None = None
+        self._source = (0, 0)
+        self._appeared = False
 
+        self.setWindowOpacity(0.0)
         self._build()
         self._load()
 
@@ -397,14 +434,19 @@ class EditorWindow(QWidget):
 
         transport = QHBoxLayout()
         transport.setSpacing(8)
-        self.btn_play = QPushButton("▶")
+        self.btn_play = PressButton(radius=9)
         self.btn_play.setObjectName("icon")
-        self.btn_play.setCursor(Qt.PointingHandCursor)
+        self.btn_play.setIcon(glyph("pause"))
+        self.btn_play.setIconSize(QSize(18, 18))
+        self.btn_play.setToolTip("Пауза (Пробел)")
         self.btn_play.clicked.connect(self._toggle_play)
         transport.addWidget(self.btn_play)
 
         self.lbl_time = QLabel("00:00.00 / 00:00.00")
         self.lbl_time.setObjectName("caption")
+        digits = self.lbl_time.font()
+        digits.setFeature(QFont.Tag("tnum"), 1)   # цифры не пляшут по ширине
+        self.lbl_time.setFont(digits)
         transport.addWidget(self.lbl_time)
         transport.addStretch(1)
 
@@ -412,8 +454,8 @@ class EditorWindow(QWidget):
         self.lbl_crop.setObjectName("caption")
         transport.addWidget(self.lbl_crop)
 
-        self.btn_reset_crop = QPushButton("Сбросить кадр")
-        self.btn_reset_crop.setCursor(Qt.PointingHandCursor)
+        self.btn_reset_crop = PressButton("Сбросить кадр")
+        self.btn_reset_crop.setToolTip("Убрать кадрирование (R)")
         self.btn_reset_crop.clicked.connect(self.preview.clear_crop)
         transport.addWidget(self.btn_reset_crop)
         root.addLayout(transport)
@@ -455,17 +497,22 @@ class EditorWindow(QWidget):
 
         controls.addStretch(1)
 
-        self.btn_folder = QPushButton("Открыть папку")
-        self.btn_folder.setCursor(Qt.PointingHandCursor)
+        # Что именно получится — до нажатия, а не после. Контекст рядом с
+        # действием избавляет от «экспортировал и посмотрел, что вышло».
+        self.lbl_result = QLabel("")
+        self.lbl_result.setObjectName("caption")
+        controls.addWidget(self.lbl_result)
+
+        self.btn_folder = PressButton("Открыть папку")
         self.btn_folder.clicked.connect(
             lambda: QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(self.settings.ensure_output_dir())))
         )
         controls.addWidget(self.btn_folder)
 
-        self.btn_export = QPushButton("Экспорт GIF")
+        self.btn_export = PressButton("Экспорт GIF")
         self.btn_export.setObjectName("primary")
-        self.btn_export.setCursor(Qt.PointingHandCursor)
+        self.btn_export.setToolTip("Собрать GIF (Enter)")
         self.btn_export.clicked.connect(self._export)
         controls.addWidget(self.btn_export)
         root.addLayout(controls)
@@ -473,35 +520,83 @@ class EditorWindow(QWidget):
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setTextVisible(False)
-        self.progress.hide()
-        root.addWidget(self.progress)
+        self.progress.setFixedHeight(6)
+        # Место под полосу зарезервировано всегда: иначе её появление сдвигает
+        # всё окно на шесть пикселей вверх.
+        self.progress.setVisible(False)
+        progress_row = QWidget()
+        progress_row.setFixedHeight(6)
+        progress_layout = QVBoxLayout(progress_row)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.addWidget(self.progress)
+        root.addWidget(progress_row)
 
         self.status = QLabel("")
         self.status.setObjectName("caption")
         root.addWidget(self.status)
+
+        for widget in (self.spin_fps, self.spin_width):
+            widget.valueChanged.connect(self._update_result)
+        self._install_shortcuts()
+
+    def _install_shortcuts(self) -> None:
+        """Окно, в котором сидят дольше всего, обязано слушаться клавиатуры."""
+        for keys, slot in (
+            (QKeySequence(Qt.Key_Space), self._toggle_play),
+            (QKeySequence(Qt.Key_Left), lambda: self._nudge(-1)),
+            (QKeySequence(Qt.Key_Right), lambda: self._nudge(+1)),
+            (QKeySequence(Qt.Key_Return), self._export),
+            (QKeySequence(Qt.Key_Enter), self._export),
+            (QKeySequence(Qt.Key_R), self.preview.clear_crop),
+            (QKeySequence(Qt.Key_Escape), self.close),
+        ):
+            QShortcut(keys, self, activated=slot)
+
+    def _nudge(self, direction: int) -> None:
+        """Шаг по кадру — так ищут точную точку реза."""
+        step = 1000 // max(self.spin_fps.value(), 1)
+        self.player.pause()
+        self.btn_play.setIcon(glyph("play"))
+        self._seek(max(self.player.position() + direction * step, 0) / 1000.0)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if getattr(self, "_appeared", False) or motion.reduced_motion():
+            return
+        self._appeared = True
+        # Окно проявляется: до этого оно возникало поверх экрана рывком, сразу
+        # после остановки записи — самый резкий момент во всём сценарии.
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(motion.ENTER_MS)
+        anim.setEasingCurve(motion.ENTER_CURVE)
+        anim.valueChanged.connect(lambda value: self.setWindowOpacity(float(value)))
+        anim.start(QAbstractAnimation.DeleteWhenStopped)
+        self._enter_anim = anim
 
     # ---- loading ---------------------------------------------------------
     def _load(self) -> None:
         info = probe(self.video_path)
         width, height = info.get("width", 0), info.get("height", 0)
         duration = info.get("duration", 0.0)
+        self._source = (width, height)
         if width and height:
             self.preview.set_source_size(width, height)
         self.timeline.set_duration(duration)
         self.player.setSource(QUrl.fromLocalFile(str(self.video_path)))
         QTimer.singleShot(60, self.player.play)
         self.status.setText(
-            f"{self.video_path.name}  ·  {width}x{height}  ·  {_format_time(duration)}"
+            f"{self.video_path.name}  ·  {width}×{height}  ·  {_format_time(duration)}"
         )
+        self._update_result()
 
     # ---- playback --------------------------------------------------------
     def _toggle_play(self) -> None:
-        if self.player.playbackState() == QMediaPlayer.PlayingState:
-            self.player.pause()
-            self.btn_play.setText("▶")
-        else:
-            self.player.play()
-            self.btn_play.setText("❚❚")
+        playing = self.player.playbackState() == QMediaPlayer.PlayingState
+        self.player.pause() if playing else self.player.play()
+        self.btn_play.setIcon(glyph("play" if playing else "pause"))
+        self.btn_play.setToolTip(("Играть" if playing else "Пауза") + " (Пробел)")
 
     def _seek(self, seconds: float) -> None:
         self.player.setPosition(int(seconds * 1000))
@@ -518,6 +613,7 @@ class EditorWindow(QWidget):
 
     def _on_trim(self, start: float, end: float) -> None:
         self.lbl_time.setText(f"{_format_time(start)} → {_format_time(end)}")
+        self._update_result()
 
     def _on_crop(self) -> None:
         region = self.preview.crop_region()
@@ -525,6 +621,22 @@ class EditorWindow(QWidget):
             "Кадрирование: весь кадр" if region is None
             else f"Кадр: {region.width}×{region.height} @ {region.x},{region.y}"
         )
+        self._update_result()
+
+    def _update_result(self) -> None:
+        """Размер и длительность будущего GIF — до экспорта, а не после."""
+        crop = self.preview.crop_region()
+        width = crop.width if crop else self._source[0]
+        height = crop.height if crop else self._source[1]
+        if not width or not height:
+            self.lbl_result.setText("")
+            return
+        target_width = self.spin_width.value()
+        if target_width and target_width < width:
+            height = round(height * target_width / width)
+            width = target_width
+        start, end = self.timeline.trim
+        self.lbl_result.setText(f"итог: {width}×{height} · {end - start:.1f} с")
 
     def _on_player_error(self, _error, message: str) -> None:
         if message:
@@ -545,8 +657,9 @@ class EditorWindow(QWidget):
         target = _unique(self.settings.ensure_output_dir() / f"{self.video_path.parent.name}.gif")
 
         self.btn_export.setEnabled(False)
+        self.btn_export.setText("Собираем…")
         self.progress.setValue(0)
-        self.progress.show()
+        self.progress.setVisible(True)
 
         self.exporter = GifExporter(
             self.video_path, target, self.settings,
@@ -563,13 +676,30 @@ class EditorWindow(QWidget):
 
     def _on_done(self, path: str, size: int) -> None:
         self.btn_export.setEnabled(True)
-        self.progress.hide()
+        self.progress.setVisible(False)
         self.status.setText(f"Сохранено: {Path(path).name}  ·  {size / 1_048_576:.2f} МБ")
+        self._flash_done()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+
+    def _flash_done(self) -> None:
+        """Единственный момент, где уместна «радость»: экспорт случается редко и
+        завершает работу. Кнопка коротко подтверждает результат и возвращается
+        к обычному виду — без конфетти."""
+        self.btn_export.setIcon(glyph("check", colour="#FFFFFF"))
+        self.btn_export.setIconSize(QSize(16, 16))
+        self.btn_export.setText("Готово")
+        delay = 200 if motion.reduced_motion() else motion.FLASH_MS * 4
+
+        def restore() -> None:
+            self.btn_export.setIcon(QIcon())
+            self.btn_export.setText("Экспорт GIF")
+
+        QTimer.singleShot(delay, restore)
 
     def _on_failed(self, message: str) -> None:
         self.btn_export.setEnabled(True)
-        self.progress.hide()
+        self.btn_export.setText("Экспорт GIF")
+        self.progress.setVisible(False)
         self.status.setText("Экспорт не удался")
         QMessageBox.warning(self, "Экспорт не удался", message[:1500])
 

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import (
+    QAbstractAnimation, QThread, QUrl, QVariantAnimation, Signal,
+)
 from PySide6.QtGui import QDesktopServices, QKeySequence
-from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,13 +20,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QProgressBar,
-    QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
 
 from .. import autostart, tools
 from ..constants import APP_NAME, APP_VERSION, DEVELOPER_URL
+from . import motion
+from .widgets import PressButton
 
 
 class ToolDownload(QThread):
@@ -50,8 +52,7 @@ class ToolDownload(QThread):
 
 def _path_row(edit: QLineEdit, on_browse) -> QHBoxLayout:
     row = QHBoxLayout()
-    browse = QPushButton("Обзор…")
-    browse.setCursor(Qt.PointingHandCursor)
+    browse = PressButton("Обзор…")
     browse.clicked.connect(on_browse)
     row.addWidget(edit, 1)
     row.addWidget(browse)
@@ -67,8 +68,23 @@ class SettingsDialog(QDialog):
         self.download: ToolDownload | None = None
         self.setWindowTitle(f"{APP_NAME} — настройки")
         self.setMinimumWidth(520)
+        self.setWindowOpacity(0.0)
         self._build()
         self._refresh_tools()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if motion.reduced_motion():
+            self.setWindowOpacity(1.0)
+            return
+        anim = QVariantAnimation(self)
+        anim.setStartValue(self.windowOpacity())
+        anim.setEndValue(1.0)
+        anim.setDuration(motion.ENTER_MS)
+        anim.setEasingCurve(motion.ENTER_CURVE)
+        anim.valueChanged.connect(lambda value: self.setWindowOpacity(float(value)))
+        anim.start(QAbstractAnimation.DeleteWhenStopped)
+        self._enter_anim = anim
 
     # ---- построение ------------------------------------------------------
     def _build(self) -> None:
@@ -104,12 +120,11 @@ class SettingsDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        cancel = QPushButton("Отмена")
-        cancel.setCursor(Qt.PointingHandCursor)
+        cancel = PressButton("Отмена")
         cancel.clicked.connect(self.reject)
-        save = QPushButton("Сохранить")
+        save = PressButton("Сохранить")
         save.setObjectName("primary")
-        save.setCursor(Qt.PointingHandCursor)
+        save.setDefault(True)
         save.clicked.connect(self._save)
         buttons.addWidget(cancel)
         buttons.addWidget(save)
@@ -200,14 +215,11 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.lbl_tools)
 
         row = QHBoxLayout()
-        self.btn_get_ffmpeg = QPushButton("Скачать FFmpeg")
-        self.btn_get_ffmpeg.setCursor(Qt.PointingHandCursor)
+        self.btn_get_ffmpeg = PressButton("Скачать FFmpeg")
         self.btn_get_ffmpeg.clicked.connect(lambda: self._fetch("ffmpeg"))
-        self.btn_get_gifsicle = QPushButton("Скачать gifsicle")
-        self.btn_get_gifsicle.setCursor(Qt.PointingHandCursor)
+        self.btn_get_gifsicle = PressButton("Скачать gifsicle")
         self.btn_get_gifsicle.clicked.connect(lambda: self._fetch("gifsicle"))
-        btn_open = QPushButton("Папка программ")
-        btn_open.setCursor(Qt.PointingHandCursor)
+        btn_open = PressButton("Папка программ")
         btn_open.clicked.connect(
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(tools.TOOLS_DIR)))
         row.addWidget(self.btn_get_ffmpeg)

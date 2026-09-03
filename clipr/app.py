@@ -21,7 +21,7 @@ from .ui.overlay import OverlayPanel
 from .ui.region_frame import RegionFrame
 from .ui.region_select import RegionSelector, physical_region
 from .ui.settings_dialog import SettingsDialog
-from .winapi import HotkeyManager, exclude_from_capture
+from .winapi import HotkeyManager, exclude_from_capture, system_animations_enabled
 
 
 class UpdateCheck(QThread):
@@ -45,7 +45,7 @@ class CliprApp(QObject):
         self.qt.setWindowIcon(app_icon())
 
         self.settings = Settings.load()
-        motion.set_reduced_motion(self.settings.reduced_motion)
+        self._apply_motion_preference()
         cleanup_temp(self.settings.ensure_temp_dir())
 
         self.region: Region | None = None
@@ -140,8 +140,17 @@ class CliprApp(QObject):
             area.bottom() - self.panel.height() - 48,
         )
 
+    def _apply_motion_preference(self) -> None:
+        """Галочка в настройках плюс системный флаг Windows.
+
+        Если человек отключил анимацию в параметрах доступности, спрашивать его
+        об этом ещё раз внутри программы незачем — уважаем сразу.
+        """
+        motion.set_reduced_motion(
+            self.settings.reduced_motion or not system_animations_enabled())
+
     def _apply_settings(self) -> None:
-        motion.set_reduced_motion(self.settings.reduced_motion)
+        self._apply_motion_preference()
         autostart.set_enabled(self.settings.autostart)
         self.hotkeys.unregister_all()
         failed = [
@@ -325,7 +334,9 @@ class CliprApp(QObject):
         elif name == "region":
             self.choose_region()
         elif name == "panel":
-            self.panel.toggle()
+            # Действие с клавиатуры не анимируем: переход превращает мгновенную
+            # команду в ожидание.
+            self.panel.toggle(instant=True)
 
     def _warn_no_ffmpeg(self) -> None:
         answer = QMessageBox.question(

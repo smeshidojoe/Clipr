@@ -18,11 +18,29 @@ import time
 
 from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QObject, QVariantAnimation
 
-# Values Apple ships for the corresponding interactions.
-MOVE = (1.0, 0.4)  # reposition
-ROTATE = (0.8, 0.4)
-SHEET = (0.8, 0.3)  # drawer / sheet, momentum-driven
-SNAPPY = (1.0, 0.28)  # small UI state changes
+# --- токены движения ------------------------------------------------------- #
+# Все длительности и пружины живут здесь. Пять почти одинаковых значений,
+# набитых по файлам вручную, — верный способ получить интерфейс, который
+# движется вразнобой.
+
+# Пружины: (затухание, отклик).
+PANEL_MORPH = (0.9, 0.28)    # панель меняет ширину при смене состояния
+PANEL_SETTLE = (0.62, 0.30)  # отпускание без броска: перелёт и возврат
+PANEL_FLICK = (0.78, 0.34)   # отпускание с броском
+
+# Длительности, мс. Потолок для интерфейса — 300 мс; выход всегда быстрее входа.
+PRESS_MS = 140               # отклик на нажатие
+PANEL_IN_MS = 120            # показ панели: часто повторяется, значит коротко
+PANEL_OUT_MS = 90            # скрытие ещё короче — выход не рассматривают
+HOVER_MS = 120               # подсветка под курсором
+ENTER_MS = 180               # появление окна, рамки, затемнения
+EXIT_MS = 110                # исчезновение
+FLASH_MS = 220               # разовая вспышка «готово»
+
+# Кривая: встроенных Qt-кривых не хватает по «характеру», OutQuint ближе всего
+# к сильному ease-out cubic-bezier(0.23, 1, 0.32, 1), который в вебе считается
+# стандартом для входа и выхода.
+ENTER_CURVE = QEasingCurve.OutQuint
 
 
 _reduced_motion = False
@@ -77,8 +95,15 @@ def spring_value(t: float, damping: float, response: float, velocity: float = 0.
     return spring_position(t, 0.0, 1.0, damping, response, velocity)
 
 
-def settle_time(damping: float, response: float, epsilon: float = 0.005) -> float:
-    """How long until the spring is visually at rest — a spring has no duration."""
+def settle_time(damping: float, response: float, epsilon: float = 0.02) -> float:
+    """Через сколько пружина визуально успокоится — фиксированной длительности
+    у неё нет.
+
+    epsilon намеренно грубый: с 0.005 последняя сотня миллисекунд уходила на
+    досаживание в доли пикселя, которого не видно. Это «перцептивная
+    длительность» — анимация считается законченной тогда, когда её перестают
+    замечать.
+    """
     omega = 2.0 * math.pi / max(response, 1e-4)
     zeta = max(damping, 1e-3)
     # Envelope e^(-zeta*omega*t) < epsilon
@@ -190,7 +215,9 @@ class VelocityTracker:
 
 
 __all__ = [
-    "MOVE", "ROTATE", "SHEET", "SNAPPY",
+    "ENTER_CURVE", "ENTER_MS", "EXIT_MS", "FLASH_MS", "HOVER_MS",
+    "PANEL_IN_MS", "PANEL_OUT_MS", "PRESS_MS",
+    "PANEL_FLICK", "PANEL_MORPH", "PANEL_SETTLE",
     "VelocityTracker",
     "project", "reduced_motion", "rubberband", "set_reduced_motion",
     "settle_time", "spring_animate", "spring_position", "spring_value",

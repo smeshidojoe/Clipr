@@ -11,12 +11,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QRect, Qt
+from PySide6.QtCore import (
+    QAbstractAnimation, QObject, QRect, Qt, QVariantAnimation,
+)
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import QLabel, QWidget
 
 from ..winapi import exclude_from_capture
-from . import theme
+from . import motion, theme
 
 THICKNESS = 2
 IDLE_COLOR = QColor(theme.ACCENT)
@@ -84,6 +86,9 @@ class RegionFrame(QObject):
         self._strips = [_Strip() for _ in range(4)]
         self._badge = _Badge()
         self._rect: QRect | None = None
+        self._colour = QColor(IDLE_COLOR)
+        self._fade: QVariantAnimation | None = None
+        self._tint: QVariantAnimation | None = None
 
     # ---- управление ------------------------------------------------------
     def show_region(self, rect: QRect, label: str = "") -> None:
@@ -96,7 +101,9 @@ class RegionFrame(QObject):
                            rect.width() + thickness * 2, thickness)
         left.setGeometry(rect.x() - thickness, rect.y(), thickness, rect.height())
         right.setGeometry(rect.right() + 1, rect.y(), thickness, rect.height())
+        appearing = not self._strips[0].isVisible()
         for strip in self._strips:
+            strip.set_colour(self._colour)
             strip.show()
             strip.raise_()
 
@@ -109,11 +116,73 @@ class RegionFrame(QObject):
         self._badge.move(rect.x() - thickness, badge_y)
         self._badge.show()
         self._badge.raise_()
+        if appearing:
+            self._fade_in()
+
+    def _fade_in(self) -> None:
+        """Рамка проявляется, а не возникает.
+
+        Резкое появление тонкой яркой линии по краю области читается как
+        дефект отрисовки; за 180 мс глаз успевает связать её с только что
+        выбранной областью.
+        """
+        windows = [*self._strips, self._badge]
+        if motion.reduced_motion():
+            for window in windows:
+                window.setWindowOpacity(1.0)
+            return
+        for window in windows:
+            window.setWindowOpacity(0.0)
+
+        def apply(value) -> None:
+            for window in windows:
+                window.setWindowOpacity(float(value))
+
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(motion.ENTER_MS)
+        anim.setEasingCurve(motion.ENTER_CURVE)
+        anim.valueChanged.connect(apply)
+        # Прозрачность делает окно слоистым — возвращаем исключение из захвата.
+        anim.finished.connect(self._reapply_exclusion)
+        anim.start(QAbstractAnimation.DeleteWhenStopped)
+        self._fade = anim
+
+    def _reapply_exclusion(self) -> None:
+        for window in (*self._strips, self._badge):
+            exclude_from_capture(int(window.winId()), True)
 
     def set_recording(self, recording: bool) -> None:
-        colour = RECORDING_COLOR if recording else IDLE_COLOR
-        for strip in self._strips:
-            strip.set_colour(colour)
+        """Цвет рамки — индикатор состояния, поэтому меняется кроссфейдом:
+        мгновенная подмена цвета выглядит как моргание, а не как смена режима."""
+        target = QColor(RECORDING_COLOR if recording else IDLE_COLOR)
+        if target == self._colour:
+            return
+        start = QColor(self._colour)
+        self._colour = target
+        if not self._strips[0].isVisible() or motion.reduced_motion():
+            for strip in self._strips:
+                strip.set_colour(target)
+            return
+
+        def apply(progress) -> None:
+            blend = QColor(
+                round(start.red() + (target.red() - start.red()) * progress),
+                round(start.green() + (target.green() - start.green()) * progress),
+                round(start.blue() + (target.blue() - start.blue()) * progress),
+            )
+            for strip in self._strips:
+                strip.set_colour(blend)
+
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(motion.ENTER_MS)
+        anim.setEasingCurve(motion.ENTER_CURVE)
+        anim.valueChanged.connect(apply)
+        anim.start(QAbstractAnimation.DeleteWhenStopped)
+        self._tint = anim
 
     def hide(self) -> None:
         for strip in self._strips:

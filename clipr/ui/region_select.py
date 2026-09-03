@@ -7,7 +7,9 @@ track the pointer 1:1 for the entire drag, never only on release.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtCore import (
+    QAbstractAnimation, QPoint, QRect, Qt, QVariantAnimation, Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QCursor,
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import QWidget
 
 from ..ffmpeg import Region
 from ..winapi import monitor_rects
-from . import theme
+from . import motion, theme
 
 MIN_DRAG = 8  # hysteresis: below this a drag reads as a click
 
@@ -84,6 +86,8 @@ class RegionSelector(QWidget):
         self._origin: QPoint | None = None
         self._current: QPoint | None = None
         self._hover = QPoint()
+        self._dim = 0.0          # прогресс затемнения, 0..1
+        self._fade: QVariantAnimation | None = None
 
         virtual = QRect()
         for screen in QGuiApplication.screens():
@@ -100,6 +104,27 @@ class RegionSelector(QWidget):
     def _screen_rect_under(self, pos: QPoint) -> QRect:
         screen = QGuiApplication.screenAt(self.mapToGlobal(pos)) or QGuiApplication.primaryScreen()
         return screen.geometry()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # Затемнение наплывает: это вход в отдельный режим, и резкая заливка
+        # экрана читается как сбой, а не как приглашение выделить область.
+        if motion.reduced_motion():
+            self._dim = 1.0
+            self.update()
+            return
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(motion.PANEL_IN_MS)
+        anim.setEasingCurve(motion.ENTER_CURVE)
+        anim.valueChanged.connect(self._set_dim)
+        anim.start(QAbstractAnimation.DeleteWhenStopped)
+        self._fade = anim
+
+    def _set_dim(self, value) -> None:
+        self._dim = float(value)
+        self.update()
 
     # ---- events ----------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
@@ -146,7 +171,7 @@ class RegionSelector(QWidget):
         local = self.rect()
         selection = self._rect()
 
-        painter.fillRect(local, QColor(0, 0, 0, 110))
+        painter.fillRect(local, QColor(0, 0, 0, int(110 * self._dim)))
         if selection.isEmpty():
             self._draw_hint(painter)
             return

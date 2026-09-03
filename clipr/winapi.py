@@ -179,3 +179,19 @@ def round_window_corners(win_id: int, width: int, height: int, radius: int = 18)
         return False
     # SetWindowRgn забирает регион себе — удалять его нам не нужно.
     return bool(user32.SetWindowRgn(wintypes.HWND(win_id), region, True))
+
+
+SPI_GETCLIENTAREAANIMATION = 0x1042
+
+
+def system_animations_enabled() -> bool:
+    """Системная настройка «Показывать анимацию в Windows».
+
+    Аналог ``prefers-reduced-motion`` в вебе: если пользователь отключил
+    анимацию в параметрах доступности, интерфейс обязан это уважать, а не ждать
+    отдельной галочки внутри программы.
+    """
+    value = wintypes.BOOL()
+    ok = user32.SystemParametersInfoW(
+        SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(value), 0)
+    return bool(value.value) if ok else True

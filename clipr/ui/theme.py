@@ -34,6 +34,10 @@ QDialog, QWidget#window {{
 QWidget#panel, QFrame#panel, QWidget#card {{
     background: {SURFACE};
     border: 1px solid {BORDER};
+    /* Светлая грань сверху — материал ловит свет. Тень окну недоступна:
+       она потребовала бы прозрачности, а прозрачное окно нельзя спрятать
+       от захвата экрана (см. winapi). */
+    border-top: 1px solid rgba(255, 255, 255, 0.17);
     border-radius: 16px;
 }}
 
@@ -88,6 +92,9 @@ QPushButton {{
 QPushButton:hover  {{ background: rgba(255, 255, 255, 0.12); }}
 QPushButton:pressed{{ background: rgba(255, 255, 255, 0.04); }}
 QPushButton:disabled {{ color: {TEXT_DIM}; border-color: rgba(255,255,255,0.05); }}
+/* Кольцо фокуса: без него клавиатурная навигация по диалогам невидима. */
+QPushButton:focus {{ border-color: {BORDER_BRIGHT}; outline: none; }}
+QPushButton#primary:focus {{ border-color: #FFFFFF; }}
 
 QPushButton#primary {{
     background: {ACCENT};
