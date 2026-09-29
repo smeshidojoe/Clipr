@@ -1,10 +1,83 @@
+<div align="center">
+
+<img src="assets/app.png" width="112" alt="">
+
 # Clipr
 
-Запись экрана с обрезкой и экспортом в лёгкий, чёткий GIF. Утилита для Windows,
-живёт в трее. PySide6 для интерфейса, FFmpeg для захвата и кодирования,
-gifsicle — для финального сжатия.
+**English** · [Русский](README.ru.md)
 
-## Запуск
+Record a part of your screen and turn it into a small, sharp GIF —
+ready to paste into a chat with `Ctrl + V`.
+
+</div>
+
+## Download
+
+1. Open the [Releases](https://github.com/SmeshidoJoe/Clipr/releases/latest) page.
+2. Download `Clipr-Setup-….exe` and run it. No administrator rights needed.
+3. On first launch Clipr offers to download FFmpeg (about 80 MB) — it does the
+   actual recording. Say yes.
+
+If Windows shows a blue “Windows protected your PC” window, click
+**More info → Run anyway**. This happens with every app that doesn't have a
+paid code-signing certificate.
+
+Works on Windows 10 and 11.
+
+## How to use
+
+Clipr lives in the tray, next to the clock. A small panel sits at the bottom of
+the screen:
+
+1. **Pick an area** — the corners button. Drag a frame, or just click to take the
+   whole monitor.
+2. **Record** — the red button. Pause and stop are on the same panel.
+3. **Edit** — after you stop, an editor opens. Drag the handles on the timeline
+   to trim, drag over the video to crop.
+4. **Export GIF** (or `Enter`). The GIF is saved and **copied to the clipboard as
+   a file**, so `Ctrl + V` in Telegram, Discord, Slack or Explorer pastes the GIF
+   itself. A small notification confirms it; click it to see the file.
+
+The panel never shows up in your recordings, even though it stays on screen.
+
+| Shortcut | Works in any app |
+| --- | --- |
+| `Ctrl + Alt + R` | start / stop recording |
+| `Ctrl + Alt + P` | pause / resume |
+| `Ctrl + Alt + A` | pick an area |
+| `Ctrl + Alt + X` | show / hide the panel |
+
+In the editor: `Space` play/pause, `←` `→` one frame, `R` reset crop, `Esc` close.
+
+**Making the GIF smaller.** In the editor, lower **Size** (a share of the
+recorded area: 50 % of 752×648 is 376×324) or **FPS**. **Compression** shrinks
+the file further but adds a bit of noise to flat colors, so it's off by default.
+
+Everything else — shortcuts, folders, language, launch with Windows, start
+minimized — is in **Settings** (the sliders button on the panel or the tray menu).
+
+## Questions
+
+**Where are my GIFs?** In `Videos\Clipr`. You can change the folder in
+Settings → Files. The source video can be kept next to the GIF (on by default),
+so you can re-export it later with other settings.
+
+**The panel disappeared.** Click the tray icon or press `Ctrl + Alt + X`. It
+always comes back to the bottom center of the main screen.
+
+**Does the cursor flicker while recording?** It shouldn't: Clipr records through
+Desktop Duplication when the area fits on one monitor. If you forced the “GDI”
+method in Settings → Recording, the cursor blinks — that's how GDI capture works.
+
+**Where are the settings?** In `%APPDATA%\Clipr`, together with the downloaded
+FFmpeg. Unfinished recordings go to `%TEMP%\Clipr` and are cleaned up after a day.
+
+**How do I uninstall it?** Settings → Apps → Clipr → Uninstall. The uninstaller
+asks whether to keep your settings and FFmpeg; your GIFs are never touched.
+
+## For developers
+
+Python 3.13, PySide6, FFmpeg in `PATH` or downloaded from the app.
 
 ```bash
 pip install -r requirements.txt
@@ -14,183 +87,40 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Ctrl+C в консоли закрывает программу — таймер-будильник даёт интерпретатору
-обработать сигнал, пока цикл событий Qt крутится в C++.
+`Ctrl + C` in the console quits. The build uses the global Python, no venv:
 
-FFmpeg и gifsicle можно поставить кнопками в настройках — они скачиваются в
-`%APPDATA%/Clipr/tools` и переживают обновление программы. Уже установленные в
-PATH тоже подхватываются (gifsicle в winget нет, только в Chocolatey:
-`choco install gifsicle`).
-
-## Сборка
+```bash
+pip install pyinstaller
+```
 
 ```bash
 pyinstaller --clean --noconfirm Clipr.spec
 ```
 
-```bash
-iscc clipr_setup.iss
-```
+Then open `clipr_setup.iss` in [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+and press Compile — the installer appears in `installer_output`.
 
-Версия живёт в одном месте — `APP_VERSION` в [clipr/constants.py](clipr/constants.py).
-`.spec` вытаскивает её регуляркой в ресурс версии exe, а `.iss` читает уже из
-собранного exe.
+The version lives in one place — `APP_VERSION` in `clipr/constants.py`; the spec
+and the installer read it from there. For self-update, attach a zip with
+`Clipr.exe` inside to the GitHub release next to the installer.
 
-## Ассеты
+How it works, in short:
 
-Иконка exe, иконка в трее и баннер рисуются одним и тем же кодом
-([clipr/ui/icons.py](clipr/ui/icons.py)) — отдельной картинки, которая однажды
-разойдётся с интерфейсом, нет. Перегенерация:
-
-```bash
-python tools_gen_assets.py
-```
-
-Кладёт в `assets/`: многоразмерный `app.ico` (16–256 px, его берёт `.spec`),
-`app.png` и карточку `banner-1280x720.png`.
-
-## Как это устроено
-
-**Сначала MP4, потом GIF.** Запись идёт в H.264 (`libx264 -crf 18 -preset
-ultrafast`), а GIF собирается только после обрезки и кадрирования. Дорогой
-проход палитры выполняется один раз — по финальному кадру, а не по материалу,
-который вот-вот выбросят.
-
-**Пауза режет запись на сегменты.** У FFmpeg нет паузы, а оставленный работать
-захват записал бы застывшие кадры. Каждая пауза закрывает сегмент, продолжение
-открывает новый, стоп склеивает их через `-c copy`.
-
-**Панель не попадает в собственную запись.** `SetWindowDisplayAffinity` с
-`WDA_EXCLUDEFROMCAPTURE` прячет окно и от BitBlt-захвата (`gdigrab`), и от
-Desktop Duplication (`ddagrab`). Важная деталь: на layered-окне вызов падает с
-`ERROR_NOT_ENOUGH_MEMORY`, поэтому панель непрозрачная, а скругление сделано
-вырезанием региона, а не через `WA_TranslucentBackground`.
-
-**Выбранная область подсвечена на экране.** Рамка собрана из четырёх тонких
-непрозрачных окон-полосок снаружи области (одно окно с дыркой было бы layered —
-см. выше), не ловит мышь и тоже исключена из захвата. Пока идёт запись, рамка
-краснеет.
-
-**GIF собирается в два прохода палитры.** `ffmpeg -i in.mp4 out.gif` даёт
-тяжёлый и мыльный результат, потому что палитра не строится по содержимому:
-
-```bash
-ffmpeg -i input.mp4 -vf "fps=15,scale=800:-1:flags=lanczos,palettegen=stats_mode=diff" palette.png
-```
-
-```bash
-ffmpeg -i input.mp4 -i palette.png -lavfi "fps=15,scale=800:-1:flags=lanczos [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle" output.gif
-```
-
-`diff_mode=rectangle` перерисовывает только изменившиеся области — на скринкасте
-со статичными окнами именно там лежит основной вес; `stats_mode=diff` нацеливает
-палитру на те же меняющиеся зоны. Сверху опционально `gifsicle -O3 --lossy`
-(результат берётся только если он реально меньше).
-
-## Управление
-
-| | |
-| --- | --- |
-| Клик по иконке в трее | показать / скрыть панель |
-| `⬚` | выбрать область (протянуть рамку или кликнуть — весь монитор) |
-| `Ctrl+Alt+R` | старт / стоп |
-| `Ctrl+Alt+P` | пауза / продолжить |
-| `Ctrl+Alt+A` | выбрать область |
-| `Ctrl+Alt+X` | показать / скрыть панель |
-
-Хоткеи глобальные (`RegisterHotKey`) и переназначаются в настройках. Панель
-двигается мышью; положение намеренно не сохраняется — каждый запуск начинается
-внизу по центру.
-
-В редакторе: маркеры на таймлайне режут по времени, рамка поверх кадра задаёт
-кадрирование (клик по пустому месту сбрасывает), дальше — **Экспорт GIF**.
-
-## Папки
-
-* готовые GIF — `Видео/Clipr` (меняется в настройках);
-* промежуточные MP4 — `%TEMP%/Clipr` (тоже меняется), с автоуборкой брошенных
-  записей старше суток;
-* настройки, логи падений и скачанные бинарники — `%APPDATA%/Clipr`.
-
-## Структура
+- Recording goes to H.264 first (`ddagrab`, falling back to `gdigrab`); pause
+  starts a new segment, stop joins them. The GIF is built only after trim/crop,
+  with a two-pass palette (`palettegen` + `paletteuse`, `diff_mode=rectangle`).
+- The panel is hidden from capture with `WDA_EXCLUDEFROMCAPTURE`. A plain
+  translucent Qt window is layered and refuses that flag, so the panel and the
+  notifications are composited on the GPU (a hidden `QRhiWidget`) — that keeps
+  both the exclusion and antialiased rounded edges.
+- Motion follows Apple's fluid-interface model: springs with damping/response,
+  release velocity carried into the spring; tokens live in `clipr/ui/motion.py`.
 
 ```
-main.py                  запуск (python main.py)
 clipr/
-  bootstrap.py           один экземпляр, применение обновления, Ctrl+C, крашлог
-  constants.py           имя, версия, репозиторий, пути
-  config.py              настройки JSON в %APPDATA%/Clipr
-  app.py                 трей, хоткеи, машина состояний записи
-  ffmpeg.py              Recorder (сегменты через QProcess) + GifExporter (QThread)
-  tools.py               ffmpeg/gifsicle: поиск и загрузка
-  updater.py             обновление через релизы GitHub
-  crashlog.py            отчёты о падениях
-  autostart.py           автозапуск через реестр
-  winapi.py              исключение из захвата, глобальные хоткеи, физические
-                         координаты мониторов, скругление окна
-  ui/
-    overlay.py           плавающая панель
-    region_select.py     полноэкранный выбор области
-    region_frame.py      подсветка выбранной области на экране
-    editor.py            предпросмотр, таймлайн, кадрирование, экспорт
-    settings_dialog.py   настройки
-    motion.py            пружины, проекция инерции, резиновые границы
-    theme.py             таблица стилей
-    icons.py             иконки, рисуемые в рантайме
+  app.py            tray, hotkeys, recording state
+  ffmpeg.py         Recorder and GifExporter
+  updater.py        self-update from GitHub releases
+  i18n.py           English and Russian strings
+  ui/               panel, area picker, editor, settings, notifications
 ```
-
-## Интерфейс
-
-Кнопки рисуют себя сами ([widgets.py](clipr/ui/widgets.py)): при нажатии
-сжимаются до 0.97 и слегка темнеют, под курсором подсвечиваются за 120 мс.
-Стандартными средствами это недостижимо — таблица стилей Qt не умеет
-`transform`, а фон стилизованного виджета рисуется ДО `paintEvent`, поэтому
-масштабировать кнопку изнутри её отрисовки невозможно (кнопка с пустым
-`paintEvent` продолжает краситься).
-
-Пиктограммы тоже рисуются кодом ([icons.py](clipr/ui/icons.py)) — одна сетка
-24×24, одна толщина штриха. Раньше это были символы из шрифта (`⬚ ❚❚ ■ 📁 ⚙ ✕`)
-разной насыщенности, причём «папка» приезжала цветной эмодзи.
-
-Клавиатура в редакторе: `Пробел` — плей/пауза, `←`/`→` — шаг в один кадр,
-`Enter` — экспорт, `R` — сбросить кадрирование, `Esc` — закрыть. Итоговый размер
-и длительность GIF показаны рядом с кнопкой экспорта — до нажатия, а не после.
-
-## Анимации
-
-Движение интерфейса построено по модели Apple fluid interfaces: пружины
-описываются *затуханием* и *откликом*, а не длительностью; анимация стартует от
-текущего экранного значения, поэтому её можно перехватить на лету; скорость
-отпускания передаётся в пружину, так что между перетаскиванием и анимацией нет
-шва; у границ — резиновое сопротивление вместо жёсткого упора. X и Y
-анимируются отдельными пружинами.
-
-Все длительности и пружины собраны в токены в начале
-[motion.py](clipr/ui/motion.py) — `PRESS_MS`, `HOVER_MS`, `ENTER_MS`, `EXIT_MS`,
-`PANEL_MORPH`, `PANEL_SETTLE`, `PANEL_FLICK`. Потолок для интерфейса — 300 мс,
-выход всегда быстрее входа, кривая входа — `OutQuint` (встроенных кривых Qt не
-хватает по характеру).
-
-Чего в интерфейсе намеренно нет: анимации на действиях с клавиатуры. Панель по
-`Ctrl+Alt+X` появляется мгновенно — переход превратил бы мгновенную команду в
-ожидание. По клику в трее она всё же проявляется за 120 мс.
-
-Режим «Меньше анимации» включается галочкой в настройках **и** автоматически,
-если анимация отключена в параметрах доступности Windows
-(`SPI_GETCLIENTAREAANIMATION`). Он не убирает обратную связь, а укорачивает её:
-пружины заменяются коротким ease-out, движение — сменой прозрачности.
-
-**Отпускание панели** настраивается константами в начале
-[overlay.py](clipr/ui/overlay.py):
-
-| | |
-| --- | --- |
-| `FLICK_SPEED` | ниже этой скорости броска нет вовсе — только перелёт на 1–7 px и возврат ровно в точку отпускания |
-| `MAX_THROW` | потолок дальности броска |
-| `DECELERATION` | 0.99; «скролльные» 0.998 для маленькой панели дают перелёт через пол-экрана |
-
-Между этими режимами нет ступеньки: дальность броска и затухание плавно
-нарастают от `FLICK_SPEED` до `2·FLICK_SPEED`. Скорость для пружины считается
-только по выборкам за последние 90 мс — иначе панель уезжала после того, как
-мышь подвинули, задержали и отпустили: в истории лежала давняя скорость, а
-новых событий при неподвижной мыши не приходит.

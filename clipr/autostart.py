@@ -16,6 +16,11 @@ def _is_frozen():
     return bool(getattr(sys, "frozen", False))
 
 
+def supported():
+    """Автозапуск имеет смысл только у собранного exe."""
+    return _is_frozen()
+
+
 def set_enabled(on):
     """Возвращает True при успехе (или в dev, где регистрировать нечего)."""
     if not _is_frozen():

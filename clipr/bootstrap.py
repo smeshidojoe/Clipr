@@ -29,6 +29,24 @@ def _is_only_instance() -> bool:
         return True                                    # при ошибке не блокируем запуск
 
 
+def _ask_first_to_show() -> None:
+    """Уже запущенная копия сидит в трее — просим её показать панель. Иначе
+    двойной клик по ярлыку при «Запускать свёрнутой» не давал бы ничего."""
+    try:
+        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtNetwork import QLocalSocket
+
+        app = QCoreApplication.instance() or QCoreApplication(sys.argv)
+        socket = QLocalSocket(app)
+        socket.connectToServer(INSTANCE_MUTEX + "-show")
+        if socket.waitForConnected(700):
+            socket.write(b"show")
+            socket.waitForBytesWritten(300)
+            socket.disconnectFromServer()
+    except Exception:
+        pass
+
+
 def _set_app_identity(app) -> None:
     """Имя для панели задач и уведомлений — иначе Windows группирует нас под
     «Python»."""
@@ -38,7 +56,7 @@ def _set_app_identity(app) -> None:
         pass
 
 
-def _install_sigint(app) -> None:
+def _install_sigint(app, quit_app) -> None:
     """Ctrl+C в консоли должен закрывать программу.
 
     Qt держит цикл событий в C++, и питоновский обработчик сигнала не получает
@@ -48,8 +66,8 @@ def _install_sigint(app) -> None:
     from PySide6.QtCore import QTimer
 
     def handler(_signum, _frame):
-        print("\nClipr: получен Ctrl+C, выходим.")
-        app.quit()
+        print("\nClipr: Ctrl+C received, quitting.")
+        quit_app()
 
     signal.signal(signal.SIGINT, handler)
     try:
@@ -74,12 +92,12 @@ def main() -> int:
         return 0
 
     if not _is_only_instance():
+        _ask_first_to_show()
         return 0
 
     from . import crashlog, updater
     try:
-        updater.apply_pending_update()       # страховка: остался распакованный апдейт
-        updater.cleanup_applied()
+        updater.cleanup_applied()            # убрать Clipr-new.exe после подмены
     except Exception:
         pass
 
@@ -89,5 +107,5 @@ def main() -> int:
     from .app import CliprApp
     app = CliprApp(sys.argv)
     _set_app_identity(app.qt)
-    _install_sigint(app.qt)
+    _install_sigint(app.qt, app.quit)
     return app.run()

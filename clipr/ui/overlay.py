@@ -1,9 +1,14 @@
 """The floating control panel.
 
 Always on top, draggable anywhere, and excluded from the capture itself via
-WDA_EXCLUDEFROMCAPTURE, so it can stay visible while recording. That exclusion
-is why the window is opaque and rounded by a window region instead of by
-``WA_TranslucentBackground``: Windows refuses the affinity on layered windows.
+WDA_EXCLUDEFROMCAPTURE, so it can stay visible while recording.
+
+Скругление — настоящее, со сглаженными краями: окно прозрачное, фон рисуется
+сам. Обычный путь к этому (WA_TranslucentBackground) делает окно layered через
+UpdateLayeredWindow, и на таком окне SetWindowDisplayAffinity падает с ошибкой
+8 — панель попадала бы в запись. Поэтому окно собирается через GPU (см.
+widgets.gpu_composited): прозрачность тогда даёт DWM, а исключение из захвата
+работает. Раньше скругление резал регион окна — без сглаживания, «лесенкой».
 
 Motion notes: the panel tracks the pointer 1:1 (respecting the grab offset),
 resists past the screen edge instead of stopping dead, and on release projects
@@ -20,21 +25,26 @@ from PySide6.QtCore import (
     QAbstractAnimation,
     QPoint,
     QRect,
+    QRectF,
     QSize,
     QTimer,
     QVariantAnimation,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QMouseEvent, QPainter
+from PySide6.QtGui import (
+    QColor, QFont, QGuiApplication, QLinearGradient, QMouseEvent, QPainter, QPen,
+)
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QLayout, QVBoxLayout, QWidget
 
-from ..winapi import exclude_from_capture, round_window_corners
+from ..i18n import tr
+from ..winapi import exclude_from_capture
 from . import motion, theme
 from .icons import glyph
-from .widgets import PressButton
+from .widgets import PressButton, gpu_composited
 
 EDGE_MARGIN = 18
+HOME_BOTTOM = 48          # «дом» панели: столько от низа рабочей области
 CORNER_RADIUS = 16
 
 # Порог броска: ниже — панель остаётся там, где её отпустили. Быстрое движение
@@ -124,11 +134,12 @@ class OverlayPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("panel")
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        gpu_composited(self)
 
         self._drag_offset: QPoint | None = None
         self._tracker = motion.VelocityTracker()
@@ -136,6 +147,7 @@ class OverlayPanel(QWidget):
         self._anim_y: QVariantAnimation | None = None
         self._anim_w: QVariantAnimation | None = None
         self._fade: QVariantAnimation | None = None
+        self._hidden = True
 
         self._build()
         self.set_state("idle")
@@ -144,7 +156,11 @@ class OverlayPanel(QWidget):
     # ---- construction ----------------------------------------------------
     def _build(self) -> None:
         row = QHBoxLayout(self)
-        row.setContentsMargins(13, 10, 13, 10)
+        # Кнопки отстоят от краёв на 10 — как сверху и снизу. Текст слева чуть
+        # дальше (14): у кнопок своя подложка, у текста её нет, и на равном
+        # отступе он оптически липнет к краю. Точка записи раньше занимала
+        # место и в покое — отсюда был лишний отступ слева.
+        row.setContentsMargins(14, 10, 10, 10)
         row.setSpacing(8)
         # Ширину анимируем сами — раскладка не должна навязывать окну размер.
         row.setSizeConstraint(QLayout.SetNoConstraint)
@@ -161,27 +177,29 @@ class OverlayPanel(QWidget):
         digits = self.timecode.font()
         digits.setFeature(QFont.Tag("tnum"), 1)
         self.timecode.setFont(digits)
-        self.region_hint = QLabel("Весь экран")
+        self._region_text = ""          # пусто — весь экран
+        self.region_hint = QLabel(tr("panel.full_screen"))
         self.region_hint.setObjectName("hint")
         stack.addWidget(self.timecode)
         stack.addWidget(self.region_hint)
         row.addLayout(stack)
-        row.addSpacing(6)
+        row.addSpacing(6)                 # текст → кнопки: 14, как отступ слева
 
-        self.btn_region = _icon_button("region", "Выбрать область записи")
+        self.btn_region = _icon_button("region", "")
 
-        self.btn_record = PressButton("Запись")
+        self.btn_record = PressButton("")
         self.btn_record.setObjectName("primary")
-        self.btn_record.setToolTip("Начать запись")
         self.btn_record.setIcon(glyph("record", colour="#FFFFFF"))
         self.btn_record.setIconSize(QSize(14, 14))
         self.btn_record.setFocusPolicy(Qt.NoFocus)
 
-        self.btn_pause = _icon_button("pause", "Пауза")
-        self.btn_stop = _icon_button("stop", "Стоп и редактирование")
-        self.btn_folder = _icon_button("folder", "Открыть папку с записями")
-        self.btn_settings = _icon_button("settings", "Настройки")
-        self.btn_close = _icon_button("close", "Скрыть панель (вернуть — клик по иконке в трее)")
+        self.btn_pause = _icon_button("pause", "")
+        self.btn_stop = _icon_button("stop", "")
+        self.btn_folder = _icon_button("folder", "")
+        self.btn_settings = _icon_button("settings", "")
+        self.btn_close = _icon_button("close", "")
+        self._paused = False
+        self.retranslate()
 
         for widget in (
             self.btn_region, self.btn_record, self.btn_pause,
@@ -200,8 +218,23 @@ class OverlayPanel(QWidget):
         self.adjustSize()
 
     # ---- public API ------------------------------------------------------
+    def retranslate(self) -> None:
+        """Подписи на текущем языке — вызывается и при смене языка на лету."""
+        self.region_hint.setText(self._region_text or tr("panel.full_screen"))
+        self.btn_region.setToolTip(tr("panel.region"))
+        self.btn_record.setText(tr("panel.record"))
+        self.btn_record.setToolTip(tr("panel.record_tip"))
+        self.btn_pause.setToolTip(tr("panel.resume" if self._paused else "panel.pause"))
+        self.btn_stop.setToolTip(tr("panel.stop"))
+        self.btn_folder.setToolTip(tr("panel.folder"))
+        self.btn_settings.setToolTip(tr("panel.settings"))
+        self.btn_close.setToolTip(tr("panel.close"))
+        if self.isVisible():
+            self._morph_width()
+
     def set_region_label(self, text: str) -> None:
-        self.region_hint.setText(text)
+        self._region_text = text
+        self.region_hint.setText(text or tr("panel.full_screen"))
         self._morph_width()      # подпись меняет ширину так же, как смена состояния
 
     def set_timecode(self, seconds: float) -> None:
@@ -221,8 +254,10 @@ class OverlayPanel(QWidget):
         self.btn_region.setEnabled(not active and not busy)
         self.btn_record.setEnabled(not busy)
         self.btn_pause.setIcon(glyph("play" if paused else "pause"))
-        self.btn_pause.setToolTip("Продолжить" if paused else "Пауза")
+        self._paused = paused
+        self.btn_pause.setToolTip(tr("panel.resume" if paused else "panel.pause"))
         self.dot.set_active(active, blinking=recording)
+        self.dot.setVisible(active)
         if not active:
             self.set_timecode(0.0)
         self._morph_width()
@@ -255,9 +290,22 @@ class OverlayPanel(QWidget):
         centre = self.x() + self.width() / 2.0
         self.setGeometry(round(centre - width / 2.0), self.y(), width, self.height())
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        round_window_corners(int(self.winId()), self.width(), self.height(), CORNER_RADIUS)
+    def paintEvent(self, _event) -> None:
+        """Фон — скруглённая плашка со сглаженными краями и светлой гранью
+        сверху (материал ловит свет)."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        body = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(theme.SURFACE))
+        painter.drawRoundedRect(body, CORNER_RADIUS, CORNER_RADIUS)
+        edge = QLinearGradient(0, 0, 0, self.height())
+        edge.setColorAt(0.0, QColor(255, 255, 255, 46))
+        edge.setColorAt(0.5, QColor(255, 255, 255, 18))
+        edge.setColorAt(1.0, QColor(255, 255, 255, 22))
+        painter.setPen(QPen(edge, 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(body, CORNER_RADIUS, CORNER_RADIUS)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -272,14 +320,37 @@ class OverlayPanel(QWidget):
         else:
             self.show_animated(instant)
 
-    def show_animated(self, instant: bool = False) -> None:
+    def home(self) -> None:
+        """Исходное место: внизу по центру основного экрана.
+
+        Сюда панель возвращается при каждом новом показе. Двигать её можно,
+        но спрятанная и открытая снова панель не должна всплывать там, где её
+        когда-то бросили, — её ищут глазами на привычном месте.
+        """
+        self._stop_anim("_anim_x")
+        self._stop_anim("_anim_y")
+        self._stop_anim("_anim_w")
+        self.layout().activate()
+        size = self.sizeHint()
+        area = QGuiApplication.primaryScreen().availableGeometry()
+        self.setGeometry(area.center().x() - size.width() // 2,
+                         area.bottom() - size.height() - HOME_BOTTOM,
+                         size.width(), size.height())
+
+    def show_animated(self, instant: bool = False, home: bool = True) -> None:
         """Появление панели.
 
         Сдвига здесь намеренно нет, а фейд короткий: панель дёргают горячей
         клавишей десятки раз в день, а действия с клавиатуры анимировать нельзя
         — анимация превращает мгновенную команду в ожидание. По хоткею
         (``instant``) панель появляется вообще без перехода.
+
+        ``home=False`` — вернуть панель туда, где она была: так делает выбор
+        области, который прячет её лишь на время.
         """
+        if home and (self._hidden or not self.isVisible()):
+            self.home()
+        self._hidden = False
         self._stop_anim("_fade")
         if instant or motion.reduced_motion():
             self.setWindowOpacity(1.0)
@@ -295,6 +366,7 @@ class OverlayPanel(QWidget):
     def hide_animated(self, instant: bool = False) -> None:
         if not self.isVisible():
             return
+        self._hidden = True           # показ после этого — снова на исходном месте
         self._stop_anim("_fade")
         if instant or motion.reduced_motion():
             self.hide()

@@ -12,6 +12,19 @@ from .constants import app_dir
 
 CONFIG_PATH = Path(app_dir()) / "settings.json"
 
+# Уровень сжатия -> gifsicle --lossy. 0 — gifsicle не запускаем вовсе.
+COMPRESS_LOSSY = {"none": 0, "light": 30, "strong": 80}
+
+
+def scaled_size(width: int, height: int, percent: int) -> tuple[int, int]:
+    """Размер GIF после уменьшения на `percent` %, округлённый до чётного —
+    так же, как его посчитает фильтр scale в FFmpeg (см. GifExporter)."""
+    if percent >= 100:
+        return width, height            # 100 % FFmpeg не масштабирует вовсе
+    factor = max(10, percent) / 100.0
+    return (max(2, int(width * factor) // 2 * 2),
+            max(2, int(height * factor) // 2 * 2))
+
 
 def _default_output_dir() -> str:
     return str(Path(os.path.expanduser("~")) / "Videos" / "Clipr")
@@ -27,27 +40,36 @@ def _default_temp_dir() -> str:
 class Settings:
     # запись
     capture_fps: int = 30
-    capture_backend: str = "gdigrab"  # gdigrab | ddagrab
+    # auto — Desktop Duplication, где возможно (курсор не мигает), иначе gdigrab.
+    # Ключ новый: у старого capture_backend значением по умолчанию был gdigrab.
+    capture_method: str = "auto"      # auto | gdigrab | ddagrab
     draw_mouse: bool = True
     output_dir: str = field(default_factory=_default_output_dir)   # готовые GIF
     temp_dir: str = field(default_factory=_default_temp_dir)       # сырые записи
 
     # экспорт GIF
     gif_fps: int = 15
-    gif_width: int = 800             # 0 = ширина исходника
+    # Размер GIF — доля от выделенной области (или кадра после crop), а не
+    # абсолютная ширина: область и так задаёт пропорции и масштаб.
+    gif_scale: int = 100             # %, 10..100
     gif_dither: str = "bayer:bayer_scale=3"
-    gif_lossy: int = 80              # gifsicle --lossy, 0 = выключено
-    gif_optimize: bool = True        # прогонять gifsicle, когда он есть
+    # Сжатие gifsicle с потерями. Без потерь (-O3) он почти ничего не даёт —
+    # FFmpeg уже пишет только изменившиеся прямоугольники (замер: −2 %), весь
+    # выигрыш даёт --lossy, а он же и портит картинку. Поэтому по умолчанию выкл.
+    gif_compress: str = "none"       # none | light | strong
 
     # приложение
     hotkey_start_stop: str = "Ctrl+Alt+R"
     hotkey_pause: str = "Ctrl+Alt+P"
     hotkey_region: str = "Ctrl+Alt+A"
     hotkey_toggle_panel: str = "Ctrl+Alt+X"
+    language: str = "en"             # en | ru — английский по умолчанию
     reduced_motion: bool = False
     keep_source_video: bool = True
     autostart: bool = False
+    start_minimized: bool = False    # стартовать в трее, без панели записи
     check_updates: bool = True
+    update_in_background: bool = False   # найденное обновление качать сразу
 
     @classmethod
     def load(cls) -> "Settings":
@@ -56,7 +78,11 @@ class Settings:
         except (OSError, ValueError):
             return cls()
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        settings = cls(**{k: v for k, v in raw.items() if k in known})
+        settings.gif_scale = max(10, min(100, int(settings.gif_scale)))
+        if settings.gif_compress not in COMPRESS_LOSSY:
+            settings.gif_compress = "none"
+        return settings
 
     def save(self) -> None:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)

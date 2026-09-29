@@ -23,6 +23,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from ..ffmpeg import Region
+from ..i18n import tr
 from ..winapi import monitor_rects
 from . import motion, theme
 
@@ -99,7 +100,10 @@ class RegionSelector(QWidget):
     def _rect(self) -> QRect:
         if self._origin is None or self._current is None:
             return QRect()
-        return QRect(self._origin, self._current).normalized()
+        # QRect(p1, p2) включает обе точки: протягивание 300→900 давало 601 px.
+        left, right = sorted((self._origin.x(), self._current.x()))
+        top, bottom = sorted((self._origin.y(), self._current.y()))
+        return QRect(left, top, right - left, bottom - top)
 
     def _screen_rect_under(self, pos: QPoint) -> QRect:
         screen = QGuiApplication.screenAt(self.mapToGlobal(pos)) or QGuiApplication.primaryScreen()
@@ -213,7 +217,7 @@ class RegionSelector(QWidget):
         painter.drawText(badge, Qt.AlignCenter, label)
 
     def _draw_hint(self, painter: QPainter) -> None:
-        text = "Drag to select an area  ·  Click for the whole screen  ·  Esc to cancel"
+        text = tr("select.hint")
         metrics = painter.fontMetrics()
         pad = 12
         width = metrics.horizontalAdvance(text) + pad * 2

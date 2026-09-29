@@ -28,6 +28,11 @@ def _pixmap(size: int, recording: bool) -> QPixmap:
     return pixmap
 
 
+def app_pixmap(size: int, recording: bool = False) -> QPixmap:
+    """Знак программы в физических пикселях (dpr задаёт вызывающий)."""
+    return _pixmap(size, recording)
+
+
 def app_icon(recording: bool = False) -> QIcon:
     icon = QIcon()
     for size in (16, 24, 32, 48, 64, 128, 256):
@@ -104,6 +109,33 @@ def _draw_glyph(painter: QPainter, name: str, colour: QColor) -> None:
     elif name == "close":
         painter.drawLine(QPointF(7.5, 7.5), QPointF(16.5, 16.5))
         painter.drawLine(QPointF(16.5, 7.5), QPointF(7.5, 16.5))
+    elif name == "film":
+        painter.drawRoundedRect(QRectF(4, 5, 16, 14), 2.5, 2.5)
+        painter.drawLine(QPointF(8.5, 5), QPointF(8.5, 19))
+        painter.drawLine(QPointF(15.5, 5), QPointF(15.5, 19))
+        painter.drawLine(QPointF(4, 12), QPointF(8.5, 12))
+        painter.drawLine(QPointF(15.5, 12), QPointF(20, 12))
+    elif name == "keyboard":
+        painter.drawRoundedRect(QRectF(3, 6.5, 18, 11), 2.5, 2.5)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(colour)
+        for x in (7, 10.3, 13.7, 17):
+            painter.drawEllipse(QPointF(x, 10), 1.05, 1.05)
+        painter.setPen(_pen(colour))
+        painter.drawLine(QPointF(8.5, 14), QPointF(15.5, 14))
+    elif name == "power":
+        path = QPainterPath()
+        # Кольцо с разрывом сверху: от 120° против часовой на 300°.
+        path.arcMoveTo(QRectF(5, 5.5, 14, 14), 120)
+        path.arcTo(QRectF(5, 5.5, 14, 14), 120, 300)
+        painter.drawPath(path)
+        painter.drawLine(QPointF(12, 4), QPointF(12, 11.5))
+    elif name == "info":
+        painter.drawEllipse(QPointF(12, 12), 8, 8)
+        painter.drawLine(QPointF(12, 11), QPointF(12, 16))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(colour)
+        painter.drawEllipse(QPointF(12, 8), 1.2, 1.2)
     elif name == "check":
         painter.drawLine(QPointF(6, 12.5), QPointF(10.5, 17))
         painter.drawLine(QPointF(10.5, 17), QPointF(18, 7.5))
@@ -126,7 +158,7 @@ def glyph_pixmap(name: str, size: int = 18, colour: str = theme.TEXT,
 
 def glyph(name: str, size: int = 18, colour: str = theme.TEXT) -> QIcon:
     """Пиктограмма для кнопки. Имена: region, record, pause, play, stop,
-    folder, settings, close, check."""
+    folder, settings, close, check, film, keyboard, power, info."""
     icon = QIcon()
     icon.addPixmap(glyph_pixmap(name, size, colour))
     icon.addPixmap(glyph_pixmap(name, size, theme.TEXT_DIM), QIcon.Disabled)

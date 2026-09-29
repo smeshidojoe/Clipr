@@ -1,14 +1,22 @@
-"""Самообновление через релизы GitHub.
+"""Самообновление через релизы GitHub (перенесено из Spotty).
 
-Поток:
-  1. check_update()       — есть ли релиз новее текущего (с zip-ассетом);
-  2. download_update(url) — качаем zip в <папка установки>/_update/update.zip;
-  3. restart_to_update()  — достаём новый exe и запускаем его с --apply-update:
-     он дожидается выхода старого процесса, подменяет его собой и стартует.
-     Так можно заменить и сам exe, заблокированный во время работы;
-  4. apply_pending_update() — страховка при старте, если помощник не отработал.
+Порядок:
+  1. check()        — есть ли релиз новее текущего и zip-ассет к нему.
+  2. download(url)  — качаем zip в <папка установки>/_update/update.zip, рядом
+     version.txt с его версией.
+  3. restart_to_update() — достаём новый exe из архива, запускаем его с флагом
+     --apply-update и немедленно выходим. Новый exe дожидается, пока старый
+     освободит файл, подменяет его собой и запускает. Иначе никак: работающий
+     exe заблокирован и заменить себя сам не может. Если запустить новый exe
+     не дали, ту же работу делает помощник на PowerShell.
 
-Только stdlib (urllib) — ничего лишнего в сборке.
+Между 2 и 3 может пройти сколько угодно: при фоновой загрузке человек сам
+выбирает, когда перезапуститься, и может до этого выйти из программы.
+pending_version() на старте находит скачанный архив, и кнопка перезапуска
+появляется снова, без повторной загрузки.
+
+Только стандартная библиотека (плюс certifi, если есть): обновление не должно
+зависеть от пакетов, которых может не оказаться в сборке.
 """
 
 import os
@@ -18,16 +26,17 @@ import sys
 import zipfile
 
 from .constants import APP_NAME, APP_VERSION, GITHUB_REPO, install_dir
-from . import tools
+from .tools import ssl_context
 
-API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+API_URL = "https://api.github.com/repos/%s/releases/latest" % GITHUB_REPO
 
-# Отвязанный процесс: переживает выход приложения.
+# Флаги отвязанного процесса: помощник должен пережить выход программы.
 _DETACHED = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
 
 UPDATE_DIR = os.path.join(install_dir(), "_update")
 UPDATE_ZIP = os.path.join(UPDATE_DIR, "update.zip")
-NEW_EXE = os.path.join(UPDATE_DIR, f"{APP_NAME}-new.exe")
+VERSION_FILE = os.path.join(UPDATE_DIR, "version.txt")
+NEW_EXE = os.path.join(UPDATE_DIR, "%s-new.exe" % APP_NAME)
 
 
 def is_frozen():
@@ -35,7 +44,7 @@ def is_frozen():
 
 
 def _parse(version):
-    """'v1.2.3' -> (1, 2, 3); нечисловые части -> 0."""
+    """'v1.2.3' -> (1, 2, 3); нечисловые куски считаем нулями."""
     out = []
     for part in (version or "").lstrip("vV").split("."):
         digits = "".join(c for c in part if c.isdigit())
@@ -47,117 +56,248 @@ def _is_newer(remote, current):
     return _parse(remote) > _parse(current)
 
 
-# ------------------------------------------------------------------ #
-def check_update(timeout=8):
-    """{"status": "available"|"current"|"error", "version", "download_url", "notes", "error"}"""
+# --- проверка и загрузка ----------------------------------------------------- #
+
+def check(timeout=8):
+    """{"status": "available" | "current" | "error", "version": ..., "url": ...}"""
     import json
     import urllib.request
-    req = urllib.request.Request(
-        API_URL, headers={"User-Agent": APP_NAME, "Accept": "application/vnd.github+json"})
+
+    request = urllib.request.Request(
+        API_URL, headers={"User-Agent": APP_NAME,
+                          "Accept": "application/vnd.github+json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=tools.ssl_context()) as resp:
-            data = json.load(resp)
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
+        with urllib.request.urlopen(request, timeout=timeout,
+                                    context=ssl_context()) as response:
+            data = json.load(response)
+    except Exception as error:
+        return {"status": "error", "error": str(error)}
 
     tag = data.get("tag_name") or ""
     if not tag:
-        return {"status": "error", "error": "нет релизов"}
+        return {"status": "error", "error": "no releases"}
     if not _is_newer(tag, APP_VERSION):
         return {"status": "current", "version": tag}
 
-    zip_url = None
+    url = None
     for asset in data.get("assets", []):
         if (asset.get("name") or "").endswith(".zip"):
-            zip_url = asset.get("browser_download_url")
+            url = asset.get("browser_download_url")
             break
-    return {"status": "available", "version": tag,
-            "download_url": zip_url, "notes": data.get("body", "")}
+    return {"status": "available", "version": tag, "url": url,
+            "notes": data.get("body", "")}
 
 
-def download_update(url, on_progress=None, timeout=120):
+def download(url, version="", on_progress=None, timeout=60):
+    """Качает zip обновления. on_progress(доля 0..1). Бросает при сбое."""
+    import urllib.request
     if not url:
-        raise RuntimeError("нет ссылки на загрузку")
-    return tools._download(url, UPDATE_ZIP, on_progress, timeout)
+        raise RuntimeError("no archive URL")
+    discard_pending()
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+    request = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+    part = UPDATE_ZIP + ".part"
+    with urllib.request.urlopen(request, timeout=timeout,
+                                context=ssl_context()) as response:
+        total = int(response.headers.get("Content-Length") or 0)
+        done = 0
+        with open(part, "wb") as out:
+            while True:
+                chunk = response.read(64 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                if on_progress and total:
+                    on_progress(done / total)
+    os.replace(part, UPDATE_ZIP)
+    with open(VERSION_FILE, "w", encoding="utf-8") as f:
+        f.write(version)
+    return True
 
 
-def has_pending_update():
+def has_pending():
     return os.path.isfile(UPDATE_ZIP)
 
 
-def apply_pending_update(target=None):
-    """Страховка при старте: распаковать оставшийся zip поверх папки установки.
-    Заблокированный exe так не заменить — это делает помощник."""
-    if not has_pending_update():
-        return False
-    try:
-        with zipfile.ZipFile(UPDATE_ZIP) as zf:
-            zf.extractall(target or install_dir())
-        os.remove(UPDATE_ZIP)
-        return True
-    except Exception:
-        return False
+def pending_version():
+    """Версия, скачанная раньше и ещё не установленная, или "".
 
+    Архив старее текущей версии или без подписи версии (программу обновили
+    установщиком, пока он лежал) — удаляем: ставить из него нечего.
+    """
+    if not is_frozen() or not has_pending():
+        return ""
+    try:
+        with open(VERSION_FILE, encoding="utf-8") as f:
+            version = f.read().strip()
+    except OSError:
+        version = ""
+    if version and _is_newer(version, APP_VERSION):
+        return version
+    discard_pending()
+    return ""
+
+
+def discard_pending():
+    for path in (UPDATE_ZIP, VERSION_FILE):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+# --- подмена работающего exe -------------------------------------------------- #
 
 def _log(message):
     try:
         import datetime
         os.makedirs(UPDATE_DIR, exist_ok=True)
-        with open(os.path.join(UPDATE_DIR, "helper.log"), "a", encoding="utf-8") as f:
-            f.write("[%s] %s\n"
-                    % (datetime.datetime.now().isoformat(timespec="seconds"), message))
+        with open(os.path.join(UPDATE_DIR, "helper.log"), "a",
+                  encoding="utf-8") as f:
+            f.write("[%s] %s\n" % (
+                datetime.datetime.now().isoformat(timespec="seconds"), message))
     except Exception:
         pass
 
 
 def _extract_new_exe():
-    """Достаёт наш exe из скачанного zip в _update/Clipr-new.exe, пока приложение
-    ещё работает: файл новый, блокировок нет."""
-    if not has_pending_update():
+    """Достаёт наш exe из архива в _update/Clipr-new.exe.
+
+    Делаем это, пока программа ещё работает: файл новый, блокировок нет.
+    """
+    if not has_pending():
         return None
     try:
-        want = os.path.basename(sys.executable).lower()
-        with zipfile.ZipFile(UPDATE_ZIP) as zf:
-            names = zf.namelist()
-            pick = next((n for n in names if os.path.basename(n).lower() == want), None)
+        wanted = os.path.basename(sys.executable).lower()
+        with zipfile.ZipFile(UPDATE_ZIP, "r") as archive:
+            names = archive.namelist()
+            pick = next((n for n in names
+                         if os.path.basename(n).lower() == wanted), None)
             if pick is None:
                 pick = next((n for n in names if n.lower().endswith(".exe")), None)
             if pick is None:
                 return None
-            os.makedirs(UPDATE_DIR, exist_ok=True)
-            with zf.open(pick) as src, open(NEW_EXE, "wb") as out:
+            with archive.open(pick) as src, open(NEW_EXE, "wb") as out:
                 shutil.copyfileobj(src, out)
         return NEW_EXE
     except Exception:
+        _log("не смог достать exe из архива")
         return None
 
 
+def _ps_lit(path):
+    """Путь как литерал PowerShell: одинарные кавычки, внутренние — удвоением."""
+    return "'%s'" % str(path).replace("'", "''")
+
+
+def _restart_via_powershell(new_exe):
+    """Запасной помощник: ждёт освобождения exe, копирует новый и запускает.
+
+    Нужен, когда запустить новый exe напрямую не дали — например, политика
+    запрещает запуск из папки _update. PowerShell есть в любой Windows.
+    """
+    log = os.path.join(UPDATE_DIR, "helper.log")
+    # Пути подставляем литералами: в них бывают кириллица и пробелы. Цикл
+    # сначала пробует удалить старый exe — это удаётся только когда процесс
+    # действительно вышел, — и лишь потом копирует новый на его место.
+    script = (
+        "$ErrorActionPreference='SilentlyContinue';\n"
+        "$old=%s; $new=%s; $log=%s;\n" % (_ps_lit(sys.executable),
+                                          _ps_lit(new_exe), _ps_lit(log)) +
+        "function L($m){ ('['+(Get-Date -Format o)+'] '+$m) |"
+        " Out-File -LiteralPath $log -Append -Encoding utf8 }\n"
+        "L('powershell helper started')\n"
+        "$gone=$false\n"
+        "for($i=0;$i -lt 200;$i++){\n"
+        "  try{ Remove-Item -LiteralPath $old -Force -ErrorAction Stop;"
+        " $gone=$true; break }\n"
+        "  catch{ Start-Sleep -Milliseconds 400 }\n"
+        "}\n"
+        "L('old removed='+$gone)\n"
+        "try{ Copy-Item -LiteralPath $new -Destination $old -Force"
+        " -ErrorAction Stop }\n"
+        "catch{ L('copy err: '+$_.Exception.Message) }\n"
+        "if(-not (Test-Path -LiteralPath $old)){"
+        " try{ Move-Item -LiteralPath $new -Destination $old -Force }catch{} }\n"
+        "Start-Process -FilePath $old\n"
+        "Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
+        "L('done')\n"
+    )
+    try:
+        import base64
+        os.makedirs(UPDATE_DIR, exist_ok=True)
+        # -EncodedCommand (base64 в UTF-16LE) снимает разом все вопросы с
+        # кавычками и кодировкой командной строки.
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        # Полный путь к powershell.exe: на PATH не полагаемся, его правят.
+        shell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                             "System32", "WindowsPowerShell", "v1.0",
+                             "powershell.exe")
+        if not os.path.isfile(shell):
+            shell = "powershell"
+        subprocess.Popen([shell, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                          "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
+                         creationflags=_DETACHED, close_fds=True)
+        _log("запущен помощник PowerShell")
+        return True
+    except Exception as error:
+        _log("не удалось запустить помощника PowerShell: %s" % error)
+        return False
+
+
+def restart_to_update():
+    """Запускает подмену и требует немедленного выхода вызывающего.
+
+    После True программа обязана тут же завершиться (os._exit), иначе её exe
+    останется заблокированным и помощник будет ждать впустую.
+    """
+    if not is_frozen() or not has_pending():
+        return False
+    new_exe = _extract_new_exe()
+    if not new_exe or not os.path.isfile(new_exe):
+        return False
+    discard_pending()             # exe уже извлечён, архив больше не нужен
+    try:
+        subprocess.Popen([new_exe, "--apply-update", sys.executable],
+                         creationflags=_DETACHED, close_fds=True)
+        _log("помощник запущен: %s" % new_exe)
+        return True
+    except Exception as error:
+        _log("не удалось запустить помощника: %s — пробую PowerShell" % error)
+    return _restart_via_powershell(new_exe)
+
+
 def apply_self_update(target):
-    """Выполняется НОВЫМ exe, запущенным с --apply-update: ждёт, пока старый
-    target освободится, подменяет его собой и запускает."""
+    """Выполняется НОВЫМ exe, запущенным с --apply-update.
+
+    Ждёт, пока старый exe освободится, подменяет его собой и запускает.
+    """
     import time
-    src = sys.executable
-    if not target or not os.path.isfile(src):
+    source = sys.executable
+    if not target or not os.path.isfile(source):
         return False
     ok = False
-    for _ in range(200):                       # до ~80 c ждём выхода старого процесса
+    for _ in range(200):                  # до ~80 секунд ждём выхода старого
         try:
-            shutil.copyfile(src, target)
+            shutil.copyfile(source, target)
             ok = True
             break
         except (PermissionError, OSError):
             time.sleep(0.4)
-    _log("self-apply copy ok=%s -> %s" % (ok, target))
+    _log("подмена ok=%s -> %s" % (ok, target))
+    # Запускаем цель в любом случае: если подмена не удалась, пользователь хотя
+    # бы не останется без программы.
     try:
         subprocess.Popen([target], creationflags=_DETACHED, close_fds=True,
                          cwd=os.path.dirname(target) or None)
-    except Exception as exc:
-        _log("relaunch err: %s" % exc)
+    except Exception as error:
+        _log("не удалось перезапустить: %s" % error)
     return ok
 
 
 def cleanup_applied():
-    """Убирает Clipr-new.exe, если он уже совпадает с текущим exe."""
+    """Убирает Clipr-new.exe, если обновление уже применилось."""
     if not is_frozen() or not os.path.isfile(NEW_EXE):
         return
     try:
@@ -165,26 +305,3 @@ def cleanup_applied():
             os.remove(NEW_EXE)
     except OSError:
         pass
-
-
-def restart_to_update():
-    """Готовит новый exe и запускает подмену. Вызывающий обязан немедленно выйти
-    (os._exit), чтобы освободить свой exe-файл. Только для собранного exe."""
-    if not is_frozen() or not has_pending_update():
-        return False
-    new_exe = _extract_new_exe()
-    if not new_exe or not os.path.isfile(new_exe):
-        _log("restart_to_update: новый exe не извлечён")
-        return False
-    try:
-        os.remove(UPDATE_ZIP)                  # exe уже извлечён, zip не нужен
-    except OSError:
-        pass
-    try:
-        subprocess.Popen([new_exe, "--apply-update", sys.executable],
-                         creationflags=_DETACHED, close_fds=True)
-        _log("запущен помощник самоподмены: %s" % new_exe)
-        return True
-    except Exception as exc:
-        _log("запуск помощника не удался: %s" % exc)
-        return False

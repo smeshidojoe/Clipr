@@ -87,19 +87,6 @@ def have_gifsicle():
     return bool(gifsicle_path())
 
 
-def status_lines():
-    """Человекочитаемое состояние бинарников — для окна настроек."""
-    def where(path):
-        if not path:
-            return "не найден"
-        return "своя копия" if path.startswith(TOOLS_DIR) else path
-    return {
-        "ffmpeg": where(ffmpeg_path()),
-        "ffprobe": where(ffprobe_path()),
-        "gifsicle": where(gifsicle_path()),
-    }
-
-
 # ------------------------------------------------------------------ #
 def _download(url, dest, progress=None, timeout=60):
     """Качает файл в dest (через .part, чтобы не оставить огрызок)."""
@@ -157,7 +144,7 @@ def download_ffmpeg(progress=None):
         except OSError:
             pass
     if len(found) < 2:
-        raise RuntimeError("в архиве нет ffmpeg.exe/ffprobe.exe")
+        raise RuntimeError("ffmpeg.exe/ffprobe.exe not found in the archive")
     return found
 
 
@@ -173,5 +160,5 @@ def download_gifsicle(progress=None):
         except OSError:
             pass
     if not found:
-        raise RuntimeError("в архиве нет gifsicle.exe")
+        raise RuntimeError("gifsicle.exe not found in the archive")
     return found[0]

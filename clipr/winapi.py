@@ -19,7 +19,6 @@ from PySide6.QtCore import QAbstractNativeEventFilter, QObject, Signal
 from PySide6.QtGui import QKeySequence
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
-gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 
 WDA_NONE = 0x00
 WDA_EXCLUDEFROMCAPTURE = 0x11
@@ -164,23 +163,6 @@ class HotkeyManager(QObject, QAbstractNativeEventFilter):
         return False, 0
 
 
-def round_window_corners(win_id: int, width: int, height: int, radius: int = 18) -> bool:
-    """Скругляет окно вырезанием региона.
-
-    Обычный путь к скруглению в Qt — WA_TranslucentBackground, но он делает окно
-    WS_EX_LAYERED, а на layered-окне SetWindowDisplayAffinity падает с
-    ERROR_NOT_ENOUGH_MEMORY (8) — то есть панель попадала бы в собственную
-    запись. Регион даёт скругление без слоя.
-    """
-    if not win_id or width <= 0 or height <= 0:
-        return False
-    region = gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2)
-    if not region:
-        return False
-    # SetWindowRgn забирает регион себе — удалять его нам не нужно.
-    return bool(user32.SetWindowRgn(wintypes.HWND(win_id), region, True))
-
-
 SPI_GETCLIENTAREAANIMATION = 0x1042
 
 
@@ -195,3 +177,70 @@ def system_animations_enabled() -> bool:
     ok = user32.SystemParametersInfoW(
         SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(value), 0)
     return bool(value.value) if ok else True
+
+
+# --- выходы Desktop Duplication ---------------------------------------------- #
+
+class _GUID(ctypes.Structure):
+    _fields_ = [("a", ctypes.c_uint32), ("b", ctypes.c_uint16), ("c", ctypes.c_uint16),
+                ("d", ctypes.c_ubyte * 8)]
+
+
+class _DXGI_OUTPUT_DESC(ctypes.Structure):
+    _fields_ = [("DeviceName", wintypes.WCHAR * 32), ("DesktopCoordinates", wintypes.RECT),
+                ("AttachedToDesktop", wintypes.BOOL), ("Rotation", ctypes.c_int),
+                ("Monitor", wintypes.HMONITOR)]
+
+
+def _com(obj, index: int, *argtypes):
+    """Метод COM-объекта по номеру в vtable. HRESULT-ошибка — OSError."""
+    vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    return ctypes.WINFUNCTYPE(ctypes.HRESULT, ctypes.c_void_p, *argtypes)(vtable[index])
+
+
+def dda_outputs() -> list[tuple[int, int, int, int]]:
+    """Прямоугольники выходов основного видеоадаптера в порядке DXGI:
+    индекс в списке — это `output_idx` фильтра ddagrab.
+
+    ddagrab нумерует мониторы по DXGI, а не по EnumDisplayMonitors, и смещения
+    ждёт относительно своего монитора. Координаты здесь те же физические, что
+    у Region, поэтому нужный выход находится простым попаданием в прямоугольник.
+    ffmpeg создаёт устройство на адаптере по умолчанию — берём его же (0).
+    """
+    import uuid
+    iid = uuid.UUID("770aae78-f26f-4dba-a829-253c83d1b387")      # IDXGIFactory1
+    guid = _GUID(iid.fields[0], iid.fields[1], iid.fields[2])
+    guid.d[:] = iid.bytes[8:]
+    found: list[tuple[int, int, int, int]] = []
+    factory = adapter = None
+    try:
+        dxgi = ctypes.WinDLL("dxgi")
+        factory = ctypes.c_void_p()
+        if dxgi.CreateDXGIFactory1(ctypes.byref(guid), ctypes.byref(factory)) != 0:
+            return found
+        adapter = ctypes.c_void_p()
+        # IDXGIFactory::EnumAdapters (7), IDXGIAdapter::EnumOutputs (7),
+        # IDXGIOutput::GetDesc (7), IUnknown::Release (2).
+        _com(factory, 7, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))(
+            factory, 0, ctypes.byref(adapter))
+        index = 0
+        while True:
+            output = ctypes.c_void_p()
+            try:
+                _com(adapter, 7, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))(
+                    adapter, index, ctypes.byref(output))
+            except OSError:                      # DXGI_ERROR_NOT_FOUND — выходы кончились
+                break
+            desc = _DXGI_OUTPUT_DESC()
+            _com(output, 7, ctypes.POINTER(_DXGI_OUTPUT_DESC))(output, ctypes.byref(desc))
+            rect = desc.DesktopCoordinates
+            found.append((rect.left, rect.top, rect.right, rect.bottom))
+            _com(output, 2)(output)
+            index += 1
+    except OSError:
+        pass
+    finally:
+        for obj in (adapter, factory):
+            if obj:
+                _com(obj, 2)(obj)
+    return found

@@ -20,6 +20,24 @@ TEXT_DIM = "#9A9AA4"
 BORDER = "rgba(255, 255, 255, 0.10)"
 BORDER_BRIGHT = "rgba(255, 255, 255, 0.22)"
 DANGER = "#E5484D"
+OK = "#3DD68C"
+
+# Окно настроек: навигация чуть темнее страницы, карточки — светлее. Иерархия
+# поверхностей читается по яркости, а не по рамкам.
+SIDEBAR = "#111114"
+CARD = "#1E1E23"
+CARD_HOVER = "#24242A"
+HAIRLINE = "#2A2A30"            # разделители строк внутри карточки
+TRACK = "#3A3A42"               # выключенный переключатель, пустая полоса
+SEGMENT_BG = "#131317"
+SEGMENT_THUMB = "#34343C"
+
+
+def mix(a: str, b: str, t: float):
+    """Линейное смешение цветов: t = 0 -> a, 1 -> b."""
+    from PySide6.QtGui import QColor
+    ca, cb = QColor(a), QColor(b)
+    return QColor.fromRgbF(*(x + (y - x) * t for x, y in zip(ca.getRgbF(), cb.getRgbF())))
 
 QSS = f"""
 * {{
@@ -159,6 +177,33 @@ QProgressBar {{
     text-align: center;
 }}
 QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
+
+/* --- окно настроек ------------------------------------------------------ */
+QWidget#settings {{ background: {WINDOW}; }}
+QWidget#sidebar {{ background: {SIDEBAR}; }}
+QScrollArea, QScrollArea > QWidget > QWidget#page {{ background: {WINDOW}; border: none; }}
+QLabel#pageTitle {{
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.5px;   /* крупный кегль — плотнее */
+}}
+QLabel#sectionTitle {{
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.6px;    /* капитель мелким кеглем — свободнее */
+    color: {TEXT_DIM};
+}}
+QLabel#rowTitle {{ font-size: 13px; }}
+QLabel#rowNote {{ font-size: 12px; color: {TEXT_DIM}; }}
+QLabel#rowNote[warn="true"] {{ color: {ACCENT}; }}
+QLabel#value {{ font-size: 13px; color: {TEXT_DIM}; }}
+QLabel#about {{ font-size: 13px; color: {TEXT_DIM}; }}
+
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {TRACK}; border-radius: 3px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: {TEXT_DIM}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
 QToolTip {{
     background: #24242A;

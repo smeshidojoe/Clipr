@@ -15,6 +15,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QThread, Signal
 
+from .config import COMPRESS_LOSSY
+from .i18n import tr
+
 from .tools import (  # noqa: F401  (re-exported: the UI imports them from here)
     ffmpeg_path,
     ffprobe_path,
@@ -58,6 +61,34 @@ class Region:
     @property
     def is_valid(self) -> bool:
         return self.width >= 16 and self.height >= 16
+
+
+_DDAGRAB: bool | None = None
+
+
+def ddagrab_available() -> bool:
+    """Есть ли в этой сборке FFmpeg фильтр ddagrab (FFmpeg 6+). Кэшируется."""
+    global _DDAGRAB
+    if _DDAGRAB is None:
+        exe = ffmpeg_path()
+        try:
+            result = run_hidden([exe, "-hide_banner", "-h", "filter=ddagrab"], timeout=10) \
+                if exe else None
+            _DDAGRAB = bool(result and "Desktop Duplication" in result.stdout)
+        except (OSError, subprocess.TimeoutExpired):
+            _DDAGRAB = False
+    return _DDAGRAB
+
+
+def dda_target(region: "Region") -> tuple[int, int, int] | None:
+    """(output_idx, x, y) для ddagrab или None, если область не лежит целиком
+    на одном мониторе основного адаптера — тогда снимает gdigrab."""
+    from .winapi import dda_outputs
+    for index, (left, top, right, bottom) in enumerate(dda_outputs()):
+        if (left <= region.x and top <= region.y
+                and region.x + region.width <= right and region.y + region.height <= bottom):
+            return index, region.x - left, region.y - top
+    return None
 
 
 def probe(path: Path) -> dict:
@@ -115,6 +146,8 @@ class Recorder(QObject):
         self._segment_start = 0.0
         self._state = "idle"  # idle | recording | paused | stopping
         self._stderr_tail = ""
+        self._backend = "gdigrab"          # чем снимает текущая запись
+        self._dda: tuple[int, int, int] | None = None
 
     # ---- state -----------------------------------------------------------
     @property
@@ -135,11 +168,11 @@ class Recorder(QObject):
         if self.is_active:
             return
         if not ffmpeg_path():
-            self.failed.emit("FFmpeg не найден. Установите его в настройках.")
+            self.failed.emit(tr("rec.no_ffmpeg"))
             return
         region = region.even()
         if not region.is_valid:
-            self.failed.emit("Область записи слишком мала.")
+            self.failed.emit(tr("rec.too_small"))
             return
 
         root = self.settings.ensure_temp_dir()
@@ -149,8 +182,11 @@ class Recorder(QObject):
         self._region = region
         self._elapsed_before_pause = 0.0
         self._stderr_tail = ""
-        self._spawn_segment()
+        self._choose_backend(region)
         self._state = "recording"
+        if not self._spawn_segment():
+            self._state = "idle"
+            return
         self.started.emit()
 
     def pause(self) -> None:
@@ -164,8 +200,10 @@ class Recorder(QObject):
     def resume(self) -> None:
         if self._state != "paused":
             return
-        self._spawn_segment()
         self._state = "recording"
+        if not self._spawn_segment():
+            self._state = "paused"
+            return
         self.resumed.emit()
 
     def toggle_pause(self) -> None:
@@ -195,14 +233,27 @@ class Recorder(QObject):
         assert self._work_dir is not None
         return self._work_dir / f"seg_{len(self._segments):03d}.mp4"
 
+    def _choose_backend(self, region: Region) -> None:
+        """Desktop Duplication, где можно; gdigrab — где нельзя.
+
+        gdigrab снимает BitBlt с флагом CAPTUREBLT, и Windows на время каждого
+        кадра прячет системный курсор — он мигает на экране всю запись. У
+        Desktop Duplication этого нет. Но ему нужна область целиком на одном
+        мониторе основного видеоадаптера и FFmpeg не старше 6.0.
+        """
+        wanted = self.settings.capture_method
+        self._dda = dda_target(region) if wanted != "gdigrab" and ddagrab_available() else None
+        self._backend = "ddagrab" if self._dda is not None else "gdigrab"
+
     def _capture_args(self, region: Region) -> list[str]:
         fps = str(self.settings.capture_fps)
         mouse = "1" if self.settings.draw_mouse else "0"
-        if self.settings.capture_backend == "ddagrab":
+        if self._backend == "ddagrab" and self._dda is not None:
+            output, x, y = self._dda
             source = (
-                f"ddagrab=output_idx=0:framerate={fps}:draw_mouse={mouse}"
+                f"ddagrab=output_idx={output}:framerate={fps}:draw_mouse={mouse}"
                 f":video_size={region.width}x{region.height}"
-                f":offset_x={region.x}:offset_y={region.y}"
+                f":offset_x={x}:offset_y={y}"
             )
             return ["-f", "lavfi", "-i", source, "-vf", "hwdownload,format=bgra"]
         return [
@@ -215,7 +266,7 @@ class Recorder(QObject):
             "-i", "desktop",
         ]
 
-    def _spawn_segment(self) -> None:
+    def _spawn_segment(self) -> bool:
         assert self._region is not None
         target = self._segment_path()
         args = [
@@ -232,14 +283,37 @@ class Recorder(QObject):
         process.setProgram(ffmpeg_path())
         process.setArguments(args)
         process.readyReadStandardError.connect(self._drain_stderr)
-        process.errorOccurred.connect(lambda _e: self.failed.emit(self._stderr_tail or "FFmpeg не запустился."))
+        process.finished.connect(lambda code, _status, p=process: self._on_exit(p, code))
         process.start()
         if not process.waitForStarted(5000):
-            self.failed.emit("Не удалось запустить FFmpeg.")
-            return
+            self.failed.emit(tr("rec.cant_start"))
+            return False
         self._process = process
         self._segments.append(target)
         self._segment_start = time.monotonic()
+        return True
+
+    def _on_exit(self, process: QProcess, code: int) -> None:
+        """FFmpeg вышел сам, а не по нашему «q»: захват не поднялся или упал.
+
+        Раньше такое оставалось незамеченным — таймер тикал, а записи не было.
+        Desktop Duplication бывает недоступен (удалённый рабочий стол, старый
+        драйвер) — тогда тихо переходим на gdigrab, а не роняем запись.
+        """
+        if process is not self._process or self._state != "recording":
+            return                                  # остановили мы сами
+        self._process = None
+        failed_segment = self._segments.pop() if self._segments else None
+        if failed_segment is not None and failed_segment.exists() \
+                and failed_segment.stat().st_size > 1024:
+            self._segments.append(failed_segment)   # что успело записаться — оставляем
+        if self._backend == "ddagrab":
+            self._backend, self._dda = "gdigrab", None
+            self._stderr_tail = ""
+            if self._spawn_segment():
+                return
+        self._state = "idle"
+        self.failed.emit(self._stderr_tail.strip() or tr("rec.not_started"))
 
     def _drain_stderr(self) -> None:
         if self._process:
@@ -281,7 +355,7 @@ class Recorder(QObject):
                 "-c", "copy", "-y", str(final),
             ], timeout=300)
             if result.returncode != 0 or not final.exists():
-                self.failed.emit(result.stderr.strip() or "Не удалось склеить сегменты записи.")
+                self.failed.emit(result.stderr.strip() or tr("rec.concat_failed"))
                 final = segments[0]
 
         self._state = "idle"
@@ -289,7 +363,7 @@ class Recorder(QObject):
 
 
 class GifExporter(QThread):
-    """Two-pass palette GIF export, optionally squeezed further by gifsicle."""
+    """Two-pass palette GIF export; gifsicle --lossy only when compression is on."""
 
     progress = Signal(int, str)  # 0..100, stage label
     done = Signal(str, int)  # path, size in bytes
@@ -319,8 +393,12 @@ class GifExporter(QThread):
             c = self.crop
             chain.append(f"crop={c.width}:{c.height}:{c.x}:{c.y}")
         chain.append(f"fps={self.settings.gif_fps}")
-        if self.settings.gif_width > 0:
-            chain.append(f"scale={self.settings.gif_width}:-1:flags=lanczos")
+        percent = self.settings.gif_scale
+        if percent < 100:
+            # Та же формула, что у config.scaled_size: доля от кадра, вниз до
+            # чётного — редактор заранее показывает ровно этот размер.
+            f = percent / 100.0
+            chain.append(f"scale=trunc(iw*{f}/2)*2:trunc(ih*{f}/2)*2:flags=lanczos")
         return ",".join(chain)
 
     def _trim_args(self) -> list[str]:
@@ -332,14 +410,14 @@ class GifExporter(QThread):
     def run(self) -> None:  # noqa: D102 (QThread entry point)
         exe = ffmpeg_path()
         if not exe:
-            self.failed.emit("FFmpeg не найден. Установите его в настройках.")
+            self.failed.emit(tr("rec.no_ffmpeg"))
             return
         self.target.parent.mkdir(parents=True, exist_ok=True)
         palette = self.target.with_suffix(".palette.png")
         filters = self._filters()
 
         try:
-            self.progress.emit(10, "Строим палитру…")
+            self.progress.emit(10, tr("gif.palette"))
             result = run_hidden([
                 exe, "-hide_banner", "-loglevel", "error",
                 *self._trim_args(), "-i", str(self.source),
@@ -347,10 +425,10 @@ class GifExporter(QThread):
                 "-y", str(palette),
             ], timeout=600)
             if result.returncode != 0:
-                self.failed.emit(result.stderr.strip() or "Ошибка palettegen.")
+                self.failed.emit(result.stderr.strip() or tr("gif.palettegen_failed"))
                 return
 
-            self.progress.emit(45, "Собираем GIF…")
+            self.progress.emit(45, tr("gif.building"))
             result = run_hidden([
                 exe, "-hide_banner", "-loglevel", "error",
                 *self._trim_args(), "-i", str(self.source),
@@ -362,17 +440,16 @@ class GifExporter(QThread):
                 "-y", str(self.target),
             ], timeout=1800)
             if result.returncode != 0:
-                self.failed.emit(result.stderr.strip() or "Ошибка paletteuse.")
+                self.failed.emit(result.stderr.strip() or tr("gif.paletteuse_failed"))
                 return
 
+            lossy = COMPRESS_LOSSY.get(self.settings.gif_compress, 0)
             gifsicle = gifsicle_path()
-            if self.settings.gif_optimize and gifsicle:
-                self.progress.emit(80, "Сжимаем…")
+            if lossy and gifsicle:
+                self.progress.emit(80, tr("gif.compressing"))
                 optimized = self.target.with_suffix(".opt.gif")
-                args = [gifsicle, "-O3"]
-                if self.settings.gif_lossy > 0:
-                    args.append(f"--lossy={self.settings.gif_lossy}")
-                args += [str(self.target), "-o", str(optimized)]
+                args = [gifsicle, "-O3", f"--lossy={lossy}",
+                        str(self.target), "-o", str(optimized)]
                 result = run_hidden(args, timeout=900)
                 if result.returncode == 0 and optimized.exists():
                     if optimized.stat().st_size < self.target.stat().st_size:
@@ -381,10 +458,10 @@ class GifExporter(QThread):
                     else:
                         optimized.unlink(missing_ok=True)
 
-            self.progress.emit(100, "Готово")
+            self.progress.emit(100, tr("gif.done"))
             self.done.emit(str(self.target), self.target.stat().st_size)
         except subprocess.TimeoutExpired:
-            self.failed.emit("FFmpeg не ответил вовремя.")
+            self.failed.emit(tr("gif.timeout"))
         except OSError as exc:
             self.failed.emit(str(exc))
         finally:

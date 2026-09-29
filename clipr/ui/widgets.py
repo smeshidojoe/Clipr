@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import (
     QAbstractAnimation,
-    QEasingCurve,
     QPointF,
     QRectF,
     QSize,
@@ -25,9 +24,27 @@ from PySide6.QtCore import (
     Qt,
 )
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QPushButton, QRhiWidget, QWidget
 
 from . import motion, theme
+
+def gpu_composited(window: QWidget) -> None:
+    """Собирать окно через GPU (RHI/Direct3D), а не растром.
+
+    Нужно прозрачным окнам, которые прячутся от захвата экрана. Растровое
+    прозрачное окно Qt делает layered через UpdateLayeredWindow, и
+    SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) на нём падает с ошибкой 8.
+    Окно, собранное через RHI, получает прозрачность от DWM — и исключение
+    работает (проверено: affinity = 1, на снимке экрана окна нет, края
+    сглажены). Переключает окно любой RHI-виджет внутри — даже скрытый
+    (проверено), поэтому ни пикселя он не рисует.
+    """
+    probe = QRhiWidget(window)
+    probe.setFixedSize(1, 1)
+    probe.setAttribute(Qt.WA_TransparentForMouseEvents)
+    probe.hide()
+    window._gpu_probe = probe          # держим ссылку
+
 
 PRESS_SCALE = 0.97          # 0.95–0.98: заметно телу, незаметно глазу
 HOVER_ALPHA = 26
@@ -115,8 +132,7 @@ class PressButton(QPushButton):
                          (motion.PRESS_MS if name == "press" else motion.HOVER_MS))
         # Наведение — единственный случай, где уместен симметричный `ease`;
         # нажатие должно стартовать резко.
-        anim.setEasingCurve(QEasingCurve.InOutSine if name == "hover"
-                            else QEasingCurve.OutCubic)
+        anim.setEasingCurve(motion.EASE if name == "hover" else motion.EASE_OUT)
         anim.valueChanged.connect(lambda value: self._apply(name, value))
         anim.start(QAbstractAnimation.DeleteWhenStopped)
         setattr(self, f"_{name}_anim", anim)

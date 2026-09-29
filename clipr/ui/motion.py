@@ -16,7 +16,9 @@ from __future__ import annotations
 import math
 import time
 
-from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QObject, QVariantAnimation
+from PySide6.QtCore import (
+    QAbstractAnimation, QEasingCurve, QObject, QPointF, QVariantAnimation,
+)
 
 # --- токены движения ------------------------------------------------------- #
 # Все длительности и пружины живут здесь. Пять почти одинаковых значений,
@@ -37,10 +39,27 @@ ENTER_MS = 180               # появление окна, рамки, зате
 EXIT_MS = 110                # исчезновение
 FLASH_MS = 220               # разовая вспышка «готово»
 
-# Кривая: встроенных Qt-кривых не хватает по «характеру», OutQuint ближе всего
-# к сильному ease-out cubic-bezier(0.23, 1, 0.32, 1), который в вебе считается
-# стандартом для входа и выхода.
-ENTER_CURVE = QEasingCurve.OutQuint
+SWITCH_MS = 180              # бегунок переключателя
+SEGMENT_MS = 200             # подложка сегментов и меню разделов
+PAGE_MS = 160                # смена страницы настроек
+
+
+def _bezier(x1: float, y1: float, x2: float, y2: float) -> QEasingCurve:
+    """cubic-bezier как в CSS. Это встроенная кривая Qt (BezierSpline), а не
+    питоновский колбэк, — Qt спокойно её копирует (так же сделано в Scribe)."""
+    curve = QEasingCurve(QEasingCurve.BezierSpline)
+    curve.addCubicBezierSegment(QPointF(x1, y1), QPointF(x2, y2), QPointF(1, 1))
+    return curve
+
+
+# Кривые. Сильный ease-out — для всего, что появляется или отвечает на
+# нажатие: движение начинается сразу, и интерфейс кажется отзывчивым.
+# ease-in-out — для того, что едет по экрану из точки в точку. Мягкий `ease` —
+# только для смены цвета под курсором.
+EASE_OUT = _bezier(0.23, 1, 0.32, 1)
+EASE_IN_OUT = _bezier(0.77, 0, 0.175, 1)
+EASE = _bezier(0.25, 0.1, 0.25, 1)
+ENTER_CURVE = EASE_OUT
 
 
 _reduced_motion = False
@@ -215,8 +234,9 @@ class VelocityTracker:
 
 
 __all__ = [
+    "EASE", "EASE_IN_OUT", "EASE_OUT",
     "ENTER_CURVE", "ENTER_MS", "EXIT_MS", "FLASH_MS", "HOVER_MS",
-    "PANEL_IN_MS", "PANEL_OUT_MS", "PRESS_MS",
+    "PAGE_MS", "PANEL_IN_MS", "PANEL_OUT_MS", "PRESS_MS", "SEGMENT_MS", "SWITCH_MS",
     "PANEL_FLICK", "PANEL_MORPH", "PANEL_SETTLE",
     "VelocityTracker",
     "project", "reduced_motion", "rubberband", "set_reduced_motion",

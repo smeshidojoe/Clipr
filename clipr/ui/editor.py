@@ -15,22 +15,24 @@ from PySide6.QtGui import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (
-    QCheckBox,
-    QComboBox,
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QProgressBar,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from ..config import scaled_size
 from ..ffmpeg import GifExporter, Region, probe
+from ..i18n import size_text, tr
 from . import motion, theme
+from .clipboard import copy_file, reveal
+from .controls import Segmented, ValueSlider
 from .icons import glyph
+from .settings_window import FPS_CHOICES, compress_choices, nearest
 from .widgets import PressButton
 
 HANDLE = 9.0  # px grab radius for crop handles
@@ -384,6 +386,12 @@ class Timeline(QWidget):
         painter.drawLine(QPointF(head, track.top() - 3), QPointF(head, track.bottom() + 3))
 
 
+def _caption(text: str) -> QLabel:
+    widget = QLabel(text)
+    widget.setObjectName("caption")
+    return widget
+
+
 def _format_time(seconds: float) -> str:
     minutes, rest = divmod(max(seconds, 0.0), 60)
     return f"{int(minutes):02d}:{rest:05.2f}"
@@ -393,17 +401,19 @@ class EditorWindow(QWidget):
     """Trim, crop and export a finished recording."""
 
     closed = Signal(str)   # путь к исходному видео — вызывающий решает, что с ним делать
+    exported = Signal(str, int)   # готовый GIF (уже в буфере обмена) и его размер
 
     def __init__(self, video_path: str, settings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("window")          # фон окна задаёт таблица стилей
-        self.setWindowTitle("Clipr — редактирование записи")
+        self.setWindowTitle(tr("editor.title"))
         self.setMinimumSize(880, 620)
         self.settings = settings
         self.video_path = Path(video_path)
         self.exporter: GifExporter | None = None
         self._source = (0, 0)
         self._appeared = False
+        self._last_gif: Path | None = None
 
         self.setWindowOpacity(0.0)
         self._build()
@@ -438,7 +448,7 @@ class EditorWindow(QWidget):
         self.btn_play.setObjectName("icon")
         self.btn_play.setIcon(glyph("pause"))
         self.btn_play.setIconSize(QSize(18, 18))
-        self.btn_play.setToolTip("Пауза (Пробел)")
+        self.btn_play.setToolTip(tr("editor.pause"))
         self.btn_play.clicked.connect(self._toggle_play)
         transport.addWidget(self.btn_play)
 
@@ -450,69 +460,62 @@ class EditorWindow(QWidget):
         transport.addWidget(self.lbl_time)
         transport.addStretch(1)
 
-        self.lbl_crop = QLabel("Кадрирование: весь кадр")
+        self.lbl_crop = QLabel(tr("editor.crop_none"))
         self.lbl_crop.setObjectName("caption")
         transport.addWidget(self.lbl_crop)
 
-        self.btn_reset_crop = PressButton("Сбросить кадр")
-        self.btn_reset_crop.setToolTip("Убрать кадрирование (R)")
+        self.btn_reset_crop = PressButton(tr("editor.reset_crop"))
+        self.btn_reset_crop.setToolTip(tr("editor.reset_crop_tip"))
         self.btn_reset_crop.clicked.connect(self.preview.clear_crop)
         transport.addWidget(self.btn_reset_crop)
         root.addLayout(transport)
         self.preview.crop_changed.connect(self._on_crop)
 
+        # Параметры GIF — строка над действиями. Те же элементы, что в
+        # настройках: одно и то же значение не должно выглядеть по-разному.
+        # Здесь только то, что меняют от ролика к ролику; сглаживание цветов
+        # живёт в настройках.
+        params = QHBoxLayout()
+        params.setSpacing(10)
+        params.addWidget(_caption(tr("editor.size")))
+        self.scale = ValueSlider(10, 100, self.settings.gif_scale,
+                                 lambda v: f"{v} %", step=5, width=150)
+        params.addWidget(self.scale)
+        params.addSpacing(8)
+        params.addWidget(_caption(tr("editor.fps")))
+        self.fps = Segmented(FPS_CHOICES, nearest(FPS_CHOICES, self.settings.gif_fps))
+        params.addWidget(self.fps)
+        params.addSpacing(8)
+        params.addWidget(_caption(tr("editor.compress")))
+        self.compress = Segmented(compress_choices(), self.settings.gif_compress)
+        self.compress.setToolTip(tr("editor.compress_tip"))
+        params.addWidget(self.compress)
+        params.addStretch(1)
+        root.addLayout(params)
+
         controls = QHBoxLayout()
         controls.setSpacing(10)
 
-        controls.addWidget(QLabel("Кадры/с"))
-        self.spin_fps = QSpinBox()
-        self.spin_fps.setRange(5, 30)
-        self.spin_fps.setValue(self.settings.gif_fps)
-        controls.addWidget(self.spin_fps)
-
-        controls.addWidget(QLabel("Ширина"))
-        self.spin_width = QSpinBox()
-        self.spin_width.setRange(0, 3840)
-        self.spin_width.setSingleStep(20)
-        self.spin_width.setSpecialValueText("как есть")
-        self.spin_width.setValue(self.settings.gif_width)
-        controls.addWidget(self.spin_width)
-
-        controls.addWidget(QLabel("Дизеринг"))
-        self.combo_dither = QComboBox()
-        self.combo_dither.addItems([
-            "bayer:bayer_scale=3",
-            "bayer:bayer_scale=5",
-            "sierra2_4a",
-            "floyd_steinberg",
-            "none",
-        ])
-        self.combo_dither.setCurrentText(self.settings.gif_dither)
-        controls.addWidget(self.combo_dither)
-
-        self.check_optimize = QCheckBox("gifsicle")
-        self.check_optimize.setChecked(self.settings.gif_optimize)
-        self.check_optimize.setToolTip("Дополнительное сжатие gifsicle, если он установлен")
-        controls.addWidget(self.check_optimize)
-
-        controls.addStretch(1)
+        self.status = QLabel("")
+        self.status.setObjectName("caption")
+        controls.addWidget(self.status, 1)
 
         # Что именно получится — до нажатия, а не после. Контекст рядом с
         # действием избавляет от «экспортировал и посмотрел, что вышло».
         self.lbl_result = QLabel("")
         self.lbl_result.setObjectName("caption")
+        digits = self.lbl_result.font()
+        digits.setFeature(QFont.Tag("tnum"), 1)
+        self.lbl_result.setFont(digits)
         controls.addWidget(self.lbl_result)
 
-        self.btn_folder = PressButton("Открыть папку")
-        self.btn_folder.clicked.connect(
-            lambda: QDesktopServices.openUrl(
-                QUrl.fromLocalFile(str(self.settings.ensure_output_dir())))
-        )
+        self.btn_folder = PressButton(tr("editor.open_folder"))
+        self.btn_folder.clicked.connect(self._open_folder)
         controls.addWidget(self.btn_folder)
 
-        self.btn_export = PressButton("Экспорт GIF")
+        self.btn_export = PressButton(tr("editor.export"))
         self.btn_export.setObjectName("primary")
-        self.btn_export.setToolTip("Собрать GIF (Enter)")
+        self.btn_export.setToolTip(tr("editor.export_tip"))
         self.btn_export.clicked.connect(self._export)
         controls.addWidget(self.btn_export)
         root.addLayout(controls)
@@ -531,12 +534,8 @@ class EditorWindow(QWidget):
         progress_layout.addWidget(self.progress)
         root.addWidget(progress_row)
 
-        self.status = QLabel("")
-        self.status.setObjectName("caption")
-        root.addWidget(self.status)
-
-        for widget in (self.spin_fps, self.spin_width):
-            widget.valueChanged.connect(self._update_result)
+        self.scale.changed.connect(self._update_result)
+        self.fps.changed.connect(self._update_result)
         self._install_shortcuts()
 
     def _install_shortcuts(self) -> None:
@@ -554,7 +553,7 @@ class EditorWindow(QWidget):
 
     def _nudge(self, direction: int) -> None:
         """Шаг по кадру — так ищут точную точку реза."""
-        step = 1000 // max(self.spin_fps.value(), 1)
+        step = 1000 // max(int(self.fps.value()), 1)
         self.player.pause()
         self.btn_play.setIcon(glyph("play"))
         self._seek(max(self.player.position() + direction * step, 0) / 1000.0)
@@ -596,7 +595,7 @@ class EditorWindow(QWidget):
         playing = self.player.playbackState() == QMediaPlayer.PlayingState
         self.player.pause() if playing else self.player.play()
         self.btn_play.setIcon(glyph("play" if playing else "pause"))
-        self.btn_play.setToolTip(("Играть" if playing else "Пауза") + " (Пробел)")
+        self.btn_play.setToolTip(tr("editor.play" if playing else "editor.pause"))
 
     def _seek(self, seconds: float) -> None:
         self.player.setPosition(int(seconds * 1000))
@@ -609,7 +608,8 @@ class EditorWindow(QWidget):
             self.player.setPosition(int(start * 1000))
             return
         self.timeline.set_playhead(seconds)
-        self.lbl_time.setText(f"{_format_time(seconds)} / выбрано {_format_time(end - start)}")
+        self.lbl_time.setText(tr("editor.selected", position=_format_time(seconds),
+                                 length=_format_time(end - start)))
 
     def _on_trim(self, start: float, end: float) -> None:
         self.lbl_time.setText(f"{_format_time(start)} → {_format_time(end)}")
@@ -618,8 +618,8 @@ class EditorWindow(QWidget):
     def _on_crop(self) -> None:
         region = self.preview.crop_region()
         self.lbl_crop.setText(
-            "Кадрирование: весь кадр" if region is None
-            else f"Кадр: {region.width}×{region.height} @ {region.x},{region.y}"
+            tr("editor.crop_none") if region is None
+            else tr("editor.crop", w=region.width, h=region.height, x=region.x, y=region.y)
         )
         self._update_result()
 
@@ -631,25 +631,22 @@ class EditorWindow(QWidget):
         if not width or not height:
             self.lbl_result.setText("")
             return
-        target_width = self.spin_width.value()
-        if target_width and target_width < width:
-            height = round(height * target_width / width)
-            width = target_width
+        width, height = scaled_size(width, height, self.scale.value())
         start, end = self.timeline.trim
-        self.lbl_result.setText(f"итог: {width}×{height} · {end - start:.1f} с")
+        self.lbl_result.setText(tr("editor.result", w=width, h=height, seconds=end - start))
 
     def _on_player_error(self, _error, message: str) -> None:
         if message:
-            self.status.setText(f"Ошибка предпросмотра: {message}")
+            self.status.setText(tr("editor.preview_error", message=message))
 
     # ---- export ----------------------------------------------------------
     def _export(self) -> None:
         if self.exporter and self.exporter.isRunning():
             return
-        self.settings.gif_fps = self.spin_fps.value()
-        self.settings.gif_width = self.spin_width.value()
-        self.settings.gif_dither = self.combo_dither.currentText()
-        self.settings.gif_optimize = self.check_optimize.isChecked()
+        # Выбранное здесь становится значением по умолчанию для следующего GIF.
+        self.settings.gif_fps = int(self.fps.value())
+        self.settings.gif_scale = self.scale.value()
+        self.settings.gif_compress = self.compress.value()
         self.settings.save()
 
         start, end = self.timeline.trim
@@ -657,7 +654,7 @@ class EditorWindow(QWidget):
         target = _unique(self.settings.ensure_output_dir() / f"{self.video_path.parent.name}.gif")
 
         self.btn_export.setEnabled(False)
-        self.btn_export.setText("Собираем…")
+        self.btn_export.setText(tr("editor.exporting"))
         self.progress.setValue(0)
         self.progress.setVisible(True)
 
@@ -677,9 +674,21 @@ class EditorWindow(QWidget):
     def _on_done(self, path: str, size: int) -> None:
         self.btn_export.setEnabled(True)
         self.progress.setVisible(False)
-        self.status.setText(f"Сохранено: {Path(path).name}  ·  {size / 1_048_576:.2f} МБ")
+        # Вместо того чтобы открывать папку — GIF сразу в буфер обмена файлом:
+        # дальше его обычно не смотрят в Проводнике, а вставляют в мессенджер.
+        self._last_gif = Path(path)
+        copy_file(path)
+        self.status.setText(tr("editor.saved", name=Path(path).name, size=size_text(size)))
         self._flash_done()
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).parent)))
+        self.exported.emit(path, size)
+
+    def _open_folder(self) -> None:
+        """После экспорта — папка с выделенным GIF, до — просто папка результатов."""
+        if self._last_gif is not None and self._last_gif.exists():
+            reveal(self._last_gif)
+        else:
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(self.settings.ensure_output_dir())))
 
     def _flash_done(self) -> None:
         """Единственный момент, где уместна «радость»: экспорт случается редко и
@@ -687,21 +696,21 @@ class EditorWindow(QWidget):
         к обычному виду — без конфетти."""
         self.btn_export.setIcon(glyph("check", colour="#FFFFFF"))
         self.btn_export.setIconSize(QSize(16, 16))
-        self.btn_export.setText("Готово")
+        self.btn_export.setText(tr("editor.copied"))
         delay = 200 if motion.reduced_motion() else motion.FLASH_MS * 4
 
         def restore() -> None:
             self.btn_export.setIcon(QIcon())
-            self.btn_export.setText("Экспорт GIF")
+            self.btn_export.setText(tr("editor.export"))
 
         QTimer.singleShot(delay, restore)
 
     def _on_failed(self, message: str) -> None:
         self.btn_export.setEnabled(True)
-        self.btn_export.setText("Экспорт GIF")
+        self.btn_export.setText(tr("editor.export"))
         self.progress.setVisible(False)
-        self.status.setText("Экспорт не удался")
-        QMessageBox.warning(self, "Экспорт не удался", message[:1500])
+        self.status.setText(tr("editor.failed"))
+        QMessageBox.warning(self, tr("editor.failed"), message[:1500])
 
     # ---- lifecycle -------------------------------------------------------
     def closeEvent(self, event) -> None:
