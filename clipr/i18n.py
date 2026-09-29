@@ -17,6 +17,7 @@ STRINGS = {
     "tray.start":        {"en": "Start Recording", "ru": "Начать запись"},
     "tray.stop":         {"en": "Stop Recording", "ru": "Остановить запись"},
     "tray.region":       {"en": "Select Area…", "ru": "Выбрать область…"},
+    "tray.full_screen":  {"en": "Record Full Screen", "ru": "Записывать весь экран"},
     "tray.folder":       {"en": "Open Folder", "ru": "Открыть папку"},
     "tray.settings":     {"en": "Settings", "ru": "Настройки"},
     "tray.update":       {"en": "Check for Updates", "ru": "Проверить обновления"},
@@ -61,6 +62,7 @@ STRINGS = {
     # --- панель записи ------------------------------------------------------- #
     "panel.full_screen": {"en": "Full Screen", "ru": "Весь экран"},
     "panel.region":      {"en": "Select recording area", "ru": "Выбрать область записи"},
+    "panel.reset_region": {"en": "Back to full screen", "ru": "Вернуть весь экран"},
     "panel.record":      {"en": "Record", "ru": "Запись"},
     "panel.record_tip":  {"en": "Start recording", "ru": "Начать запись"},
     "panel.pause":       {"en": "Pause", "ru": "Пауза"},
@@ -96,6 +98,7 @@ STRINGS = {
 
     # --- редактор ------------------------------------------------------------ #
     "editor.title":      {"en": "Clipr — Edit Recording", "ru": "Clipr — редактирование записи"},
+    "editor.heading":    {"en": "Edit Recording", "ru": "Редактирование записи"},
     "editor.pause":      {"en": "Pause (Space)", "ru": "Пауза (Пробел)"},
     "editor.play":       {"en": "Play (Space)", "ru": "Играть (Пробел)"},
     "editor.crop_none":  {"en": "Crop: full frame", "ru": "Кадрирование: весь кадр"},

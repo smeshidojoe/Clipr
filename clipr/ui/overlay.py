@@ -23,7 +23,9 @@ import time
 
 from PySide6.QtCore import (
     QAbstractAnimation,
+    QEvent,
     QPoint,
+    QPointF,
     QRect,
     QRectF,
     QSize,
@@ -40,6 +42,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QLayout, QVBoxLayout, QWidget
 from ..i18n import tr
 from ..winapi import exclude_from_capture
 from . import motion, theme
+from .controls import Tween
 from .icons import glyph
 from .widgets import PressButton, gpu_composited
 
@@ -121,10 +124,88 @@ class RecordDot(QWidget):
         painter.drawEllipse(self.rect().center(), 4, 4)
 
 
+class RegionChip(QLabel):
+    """Подпись области под таймкодом. Когда выбрана своя область, справа
+    появляется крестик: щелчок по подписи возвращает весь экран. Сброс живёт
+    прямо на том, что сбрасывает, — искать его в меню не приходится."""
+
+    reset_requested = Signal()
+    CROSS_SPACE = 15
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("hint")
+        self._clearable = False
+        self._hover = Tween(self, 0.0, motion.HOVER_MS, motion.EASE)
+
+    def set_clearable(self, clearable: bool) -> None:
+        self._clearable = clearable
+        self._apply()
+
+    def _active(self) -> bool:
+        return self._clearable and self.isEnabled()
+
+    def _apply(self) -> None:
+        active = self._active()
+        self.setContentsMargins(0, 0, self.CROSS_SPACE if active else 0, 0)
+        self.setCursor(Qt.PointingHandCursor if active else Qt.ArrowCursor)
+        self.setToolTip(tr("panel.reset_region") if active else "")
+        if not active:
+            self._hover.to(0.0, animate=False)
+        self.update()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.EnabledChange:
+            self._apply()
+
+    def enterEvent(self, event) -> None:
+        if self._active():
+            self._hover.to(1.0)
+
+    def leaveEvent(self, event) -> None:
+        self._hover.to(0.0)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        # Нажатие забираем себе, иначе его подхватит панель и начнёт таскаться.
+        if self._active() and event.button() == Qt.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if (self._active() and event.button() == Qt.LeftButton
+                and self.rect().contains(event.position().toPoint())):
+            self.reset_requested.emit()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._active():
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        hover = self._hover.value
+        centre = QPointF(self.width() - 5.5, self.height() / 2.0 + 0.5)
+        if hover:
+            fill = QColor(255, 255, 255, int(28 * hover))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(fill)
+            painter.drawEllipse(centre, 6.5, 6.5)
+        painter.setPen(QPen(theme.mix(theme.TEXT_DIM, theme.TEXT, hover), 1.3,
+                            Qt.SolidLine, Qt.RoundCap))
+        size = 2.6
+        painter.drawLine(centre + QPointF(-size, -size), centre + QPointF(size, size))
+        painter.drawLine(centre + QPointF(size, -size), centre + QPointF(-size, size))
+
+
 class OverlayPanel(QWidget):
     """Compact always-on-top controller."""
 
     select_region_requested = Signal()
+    reset_region_requested = Signal()
+    visibility_changed = Signal(bool)   # панель показана/прячется (для рамки области)
     start_requested = Signal()
     pause_requested = Signal()
     stop_requested = Signal()
@@ -178,8 +259,9 @@ class OverlayPanel(QWidget):
         digits.setFeature(QFont.Tag("tnum"), 1)
         self.timecode.setFont(digits)
         self._region_text = ""          # пусто — весь экран
-        self.region_hint = QLabel(tr("panel.full_screen"))
-        self.region_hint.setObjectName("hint")
+        self.region_hint = RegionChip()
+        self.region_hint.setText(tr("panel.full_screen"))
+        self.region_hint.reset_requested.connect(self.reset_region_requested)
         stack.addWidget(self.timecode)
         stack.addWidget(self.region_hint)
         row.addLayout(stack)
@@ -235,6 +317,7 @@ class OverlayPanel(QWidget):
     def set_region_label(self, text: str) -> None:
         self._region_text = text
         self.region_hint.setText(text or tr("panel.full_screen"))
+        self.region_hint.set_clearable(bool(text))
         self._morph_width()      # подпись меняет ширину так же, как смена состояния
 
     def set_timecode(self, seconds: float) -> None:
@@ -252,6 +335,7 @@ class OverlayPanel(QWidget):
         self.btn_pause.setVisible(active)
         self.btn_stop.setVisible(active)
         self.btn_region.setEnabled(not active and not busy)
+        self.region_hint.setEnabled(not active and not busy)   # во время записи — без крестика
         self.btn_record.setEnabled(not busy)
         self.btn_pause.setIcon(glyph("play" if paused else "pause"))
         self._paused = paused
@@ -320,6 +404,11 @@ class OverlayPanel(QWidget):
         else:
             self.show_animated(instant)
 
+    def is_shown(self) -> bool:
+        """Панель открыта для пользователя. Не то же, что isVisible(): во время
+        фейда закрытия окно ещё видно, а при выборе области скрыто лишь на время."""
+        return not self._hidden
+
     def home(self) -> None:
         """Исходное место: внизу по центру основного экрана.
 
@@ -351,6 +440,7 @@ class OverlayPanel(QWidget):
         if home and (self._hidden or not self.isVisible()):
             self.home()
         self._hidden = False
+        self.visibility_changed.emit(True)
         self._stop_anim("_fade")
         if instant or motion.reduced_motion():
             self.setWindowOpacity(1.0)
@@ -367,6 +457,7 @@ class OverlayPanel(QWidget):
         if not self.isVisible():
             return
         self._hidden = True           # показ после этого — снова на исходном месте
+        self.visibility_changed.emit(False)
         self._stop_anim("_fade")
         if instant or motion.reduced_motion():
             self.hide()

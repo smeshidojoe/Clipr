@@ -24,6 +24,7 @@ from .ui.region_frame import RegionFrame
 from .ui.region_select import RegionSelector, physical_region
 from .ui.settings_window import SettingsWindow
 from .ui.toast import Toast
+from .ui.widgets import rounded_menu
 from .updates import UpdateService
 from .winapi import HotkeyManager, exclude_from_capture, system_animations_enabled
 
@@ -57,6 +58,7 @@ class CliprApp(QObject):
 
         self.region: Region | None = None
         self.region_rect: QRect | None = None      # логические координаты для рамки
+        self._selector: RegionSelector | None = None   # открытый выбор области
         self.editor: EditorWindow | None = None
         self.settings_window: SettingsWindow | None = None
         self._failed_hotkeys: set[str] = set()
@@ -74,6 +76,8 @@ class CliprApp(QObject):
 
         self.panel = OverlayPanel()
         self.panel.select_region_requested.connect(self.choose_region)
+        self.panel.reset_region_requested.connect(self.reset_region)
+        self.panel.visibility_changed.connect(self._on_panel_visibility)
         self.panel.start_requested.connect(self.start_recording)
         self.panel.pause_requested.connect(self.recorder.toggle_pause)
         self.panel.stop_requested.connect(self.recorder.stop)
@@ -119,12 +123,15 @@ class CliprApp(QObject):
         self.tray.setToolTip(APP_NAME)
 
         menu = QMenu()
+        rounded_menu(menu)
         self.action_panel = QAction(menu)
         self.action_panel.triggered.connect(self.panel.toggle)
         self.action_record = QAction(menu)
         self.action_record.triggered.connect(self.toggle_recording)
         self.action_region = QAction(menu)
         self.action_region.triggered.connect(self.choose_region)
+        self.action_full_screen = QAction(menu)
+        self.action_full_screen.triggered.connect(self.reset_region)
         self.action_folder = QAction(menu)
         self.action_folder.triggered.connect(self.open_folder)
         self.action_settings = QAction(menu)
@@ -137,6 +144,9 @@ class CliprApp(QObject):
         menu.addAction(self.action_panel)
         menu.addAction(self.action_record)
         menu.addAction(self.action_region)
+        menu.addAction(self.action_full_screen)
+        # Пункт есть только когда выбрана своя область: сбрасывать нечего — нечего и показывать.
+        menu.aboutToShow.connect(self._update_region_actions)
         menu.addSeparator()
         menu.addAction(self.action_folder)
         menu.addAction(self.action_settings)
@@ -154,6 +164,7 @@ class CliprApp(QObject):
         self.action_panel.setText(tr("tray.show_panel"))
         self.action_record.setText(tr("tray.stop" if self.recorder.is_active else "tray.start"))
         self.action_region.setText(tr("tray.region"))
+        self.action_full_screen.setText(tr("tray.full_screen"))
         self.action_folder.setText(tr("tray.folder"))
         self.action_settings.setText(tr("tray.settings"))
         ready = self.updates.ready_version()
@@ -260,9 +271,12 @@ class CliprApp(QObject):
 
     # ---- действия --------------------------------------------------------
     def choose_region(self) -> None:
-        if self.recorder.is_active:
+        # Область выбирают только при открытой панели: спрятанная панель прячет
+        # и рамку, и выбор вслепую ничего бы не показал. Хоткей выбора тогда
+        # молчит — работает лишь хоткей, открывающий панель.
+        if (self.recorder.is_active or not self.panel.is_shown()
+                or self._selector is not None):
             return
-        was_visible = self.panel.isVisible()
         self.panel.hide()
         self.region_frame.hide()               # рамка не должна мешать выбору
         selector = RegionSelector()
@@ -283,10 +297,9 @@ class CliprApp(QObject):
 
         def restore() -> None:
             self._selector = None
-            self._show_region_frame()
-            if was_visible:
-                # Панель пряталась только на время выбора — место не меняем.
-                self.panel.show_animated(home=False)
+            # Панель пряталась только на время выбора — место не меняем.
+            # Рамку области покажет она же (visibility_changed).
+            self.panel.show_animated(home=False)
 
         selector.selected.connect(on_selected)
         selector.cancelled.connect(restore)
@@ -304,6 +317,36 @@ class CliprApp(QObject):
         self.region_frame.show_region(
             self.region_rect, f"{self.region.width}×{self.region.height}")
         self.region_frame.set_recording(self.recorder.state == "recording")
+
+    def reset_region(self) -> None:
+        """Назад к записи всего экрана — к тому, что было до выбора области."""
+        if self.recorder.is_active:
+            return
+        self.region = None
+        self.region_rect = None
+        self.region_frame.hide()
+        self.panel.set_region_label("")
+        if self.settings_window is not None:
+            self.settings_window.sync()
+
+    def _update_region_actions(self) -> None:
+        """Пункты области в трее — по тем же правилам, что и хоткей: при
+        спрятанной панели выбор недоступен (серый — чтобы было видно, что
+        пункт есть, просто сейчас нельзя)."""
+        available = self.panel.is_shown() and not self.recorder.is_active
+        self.action_region.setEnabled(available)
+        self.action_full_screen.setVisible(available and self._has_custom_region())
+
+    def _has_custom_region(self) -> bool:
+        return self.region_rect is not None and not self._is_full_screen(self.region_rect)
+
+    def _on_panel_visibility(self, visible: bool) -> None:
+        """Рамка области живёт вместе с панелью: спрятали панель — рамка не
+        должна висеть на экране сама по себе."""
+        if visible:
+            self._show_region_frame()
+        else:
+            self.region_frame.hide()
 
     @staticmethod
     def _is_full_screen(rect: QRect) -> bool:
@@ -467,9 +510,7 @@ class CliprApp(QObject):
         self.editor.setAttribute(Qt.WA_DeleteOnClose)
         self.editor.closed.connect(self._on_editor_closed)
         self.editor.exported.connect(self._on_exported)
-        self.editor.show()
-        self.editor.raise_()
-        self.editor.activateWindow()
+        self.editor.present()
 
     def _on_editor_closed(self, video_path: str) -> None:
         self.editor = None

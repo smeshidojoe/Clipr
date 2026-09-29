@@ -46,6 +46,18 @@ def gpu_composited(window: QWidget) -> None:
     window._gpu_probe = probe          # держим ссылку
 
 
+def rounded_menu(menu: QWidget) -> None:
+    """Меню со скруглёнными углами без квадратной подложки.
+
+    Скругление из таблицы стилей рисуется внутри прямоугольного окна, и его
+    углы видны на светлом фоне. Прозрачный фон убирает подложку, а системная
+    тень всплывающих окон (CS_DROPSHADOW) всегда прямоугольная — её тоже нет.
+    """
+    menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint
+                        | Qt.NoDropShadowWindowHint)
+    menu.setAttribute(Qt.WA_TranslucentBackground)
+
+
 PRESS_SCALE = 0.97          # 0.95–0.98: заметно телу, незаметно глазу
 HOVER_ALPHA = 26
 PRESS_TINT = 26             # нажатая кнопка ещё и темнеет — как вдавленная

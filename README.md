@@ -30,7 +30,7 @@ Clipr lives in the tray, next to the clock. A small panel sits at the bottom of
 the screen:
 
 1. **Pick an area** — the corners button. Drag a frame, or just click to take the
-   whole monitor.
+   whole monitor. The × next to the area size on the panel goes back to full screen.
 2. **Record** — the red button. Pause and stop are on the same panel.
 3. **Edit** — after you stop, an editor opens. Drag the handles on the timeline
    to trim, drag over the video to crop.
@@ -44,7 +44,7 @@ The panel never shows up in your recordings, even though it stays on screen.
 | --- | --- |
 | `Ctrl + Alt + R` | start / stop recording |
 | `Ctrl + Alt + P` | pause / resume |
-| `Ctrl + Alt + A` | pick an area |
+| `Ctrl + Alt + A` | pick an area (while the panel is open) |
 | `Ctrl + Alt + X` | show / hide the panel |
 
 In the editor: `Space` play/pause, `←` `→` one frame, `R` reset crop, `Esc` close.

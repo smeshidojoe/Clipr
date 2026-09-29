@@ -9,8 +9,8 @@ from PySide6.QtCore import (
     QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QDesktopServices, QFont, QIcon, QKeySequence, QMouseEvent, QPainter,
-    QPen, QShortcut,
+    QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QMouseEvent,
+    QPainter, QPen, QShortcut,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -29,6 +29,7 @@ from ..config import scaled_size
 from ..ffmpeg import GifExporter, Region, probe
 from ..i18n import size_text, tr
 from . import motion, theme
+from .chrome import CaptionBar, WindowsChrome
 from .clipboard import copy_file, reveal
 from .controls import Segmented, ValueSlider
 from .icons import glyph
@@ -414,16 +415,83 @@ class EditorWindow(QWidget):
         self._source = (0, 0)
         self._appeared = False
         self._last_gif: Path | None = None
+        self._normal: QRect | None = None
 
         self.setWindowOpacity(0.0)
         self._build()
+        self._restore_placement()
         self._load()
+
+    def _restore_placement(self) -> None:
+        """Размер и место — как в прошлый раз.
+
+        Рамку меняем до показа: пока окно думает, что у него системная
+        рамка, заданный размер относится к клиентской области, и после смены
+        рамки окно вырастает на её толщину — с каждым открытием всё больше.
+        """
+        self.winId()
+        self.chrome.on_show()
+        saved = self.settings.editor_geometry
+        if not saved:
+            self.resize(1000, 700)
+            return
+        rect = QRect(*saved)
+        rect.setSize(rect.size().expandedTo(self.minimumSize()))
+        # Монитор могли отключить — тогда окно встанет по умолчанию.
+        visible = any(
+            (part := screen.availableGeometry().intersected(rect)).width() >= 200
+            and part.height() >= 120 for screen in QGuiApplication.screens())
+        if visible:
+            self.setGeometry(rect)
+            self._normal = rect           # окно может открыться развёрнутым
+        else:
+            self.resize(rect.size().boundedTo(QSize(1000, 700)))
+
+    def present(self) -> None:
+        if self.settings.editor_maximized:
+            self.showMaximized()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _track_normal(self) -> None:
+        """Обычное положение запоминаем сами: normalGeometry() развёрнутого
+        окна со своей рамкой врёт на толщину рамки, и окно сжималось бы с
+        каждым «развернул — закрыл»."""
+        if self.windowState() == Qt.WindowNoState and self.isVisible():
+            self._normal = QRect(self.geometry())
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._track_normal()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._track_normal()
+
+    def _remember_placement(self) -> None:
+        self.settings.editor_maximized = bool(self.windowState() & Qt.WindowMaximized)
+        rect = self._normal if self._normal is not None else self.geometry()
+        if rect.isValid():
+            self.settings.editor_geometry = [rect.x(), rect.y(), rect.width(), rect.height()]
+        self.settings.save()
 
     # ---- construction ----------------------------------------------------
     def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
+        # Рамка своя, как у настроек: полоса сверху — заголовок, системные
+        # тень, привязка к краям и изменение размера остаются (см. chrome).
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.bar = CaptionBar(tr("editor.heading"))
+        outer.addWidget(self.bar)
+        self.chrome = WindowsChrome(self, self.bar, self.bar.layout_,
+                                    ("min", "max", "close"))
+        root = QVBoxLayout()
+        root.setContentsMargins(16, 4, 16, 16)
         root.setSpacing(12)
+        outer.addLayout(root, 1)
 
         self.preview = PreviewView()
         root.addWidget(self.preview, 1)
@@ -558,8 +626,13 @@ class EditorWindow(QWidget):
         self.btn_play.setIcon(glyph("play"))
         self._seek(max(self.player.position() + direction * step, 0) / 1000.0)
 
+    def nativeEvent(self, event_type, message):
+        handled = self.chrome.native_event(event_type, message)
+        return handled if handled is not None else super().nativeEvent(event_type, message)
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.chrome.on_show()
         if getattr(self, "_appeared", False) or motion.reduced_motion():
             return
         self._appeared = True
@@ -714,6 +787,7 @@ class EditorWindow(QWidget):
 
     # ---- lifecycle -------------------------------------------------------
     def closeEvent(self, event) -> None:
+        self._remember_placement()
         self.player.stop()
         if self.exporter and self.exporter.isRunning():
             self.exporter.wait(3000)

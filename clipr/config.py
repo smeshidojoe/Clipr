@@ -71,6 +71,10 @@ class Settings:
     check_updates: bool = True
     update_in_background: bool = False   # найденное обновление качать сразу
 
+    # окно редактора: где стояло и было ли развёрнуто — откроется так же
+    editor_geometry: list[int] = field(default_factory=list)   # x, y, w, h
+    editor_maximized: bool = False
+
     @classmethod
     def load(cls) -> "Settings":
         try:
@@ -82,6 +86,10 @@ class Settings:
         settings.gif_scale = max(10, min(100, int(settings.gif_scale)))
         if settings.gif_compress not in COMPRESS_LOSSY:
             settings.gif_compress = "none"
+        geometry = settings.editor_geometry
+        if not (isinstance(geometry, list) and len(geometry) == 4
+                and all(isinstance(v, int) for v in geometry)):
+            settings.editor_geometry = []
         return settings
 
     def save(self) -> None:
