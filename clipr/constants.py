@@ -9,7 +9,7 @@ import os
 import sys
 
 APP_NAME = "Clipr"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.5"
 
 GITHUB_REPO = "smeshidojoe/Clipr"
 DEVELOPER_URL = "https://github.com/smeshidojoe"
