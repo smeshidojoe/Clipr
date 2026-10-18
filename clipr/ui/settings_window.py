@@ -47,8 +47,8 @@ NAV = [
     ("about", "info"),
 ]
 
-FPS_CHOICES = [("10", "10"), ("12", "12"), ("15", "15"), ("20", "20"), ("25", "25"),
-               ("30", "30")]
+FPS_CHOICES = [("10", "10"), ("15", "15"), ("20", "20"), ("30", "30"), ("50", "50"),
+               ("60", "60")]
 DITHER_CHOICES = [("bayer:bayer_scale=3", "dither.bayer"), ("sierra2_4a", "dither.diffusion"),
                   ("none", "dither.none")]
 COMPRESS_CHOICES = [("none", "compress.none"), ("light", "compress.light"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,10 +15,10 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from . import autostart, i18n, tools
 from .config import Settings
 from .constants import APP_NAME, APP_VERSION, INSTANCE_MUTEX
-from .ffmpeg import Recorder, Region, cleanup_temp
+from .ffmpeg import Recorder, Region, cleanup_temp, ffmpeg_path, run_hidden
 from .i18n import size_text, tr
 from .ui import motion, theme
-from .ui.editor import EditorWindow
+from .ui.editor import EditorWindow, unique_path
 from .ui.icons import app_icon
 from .ui.overlay import OverlayPanel
 from .ui.region_frame import RegionFrame
@@ -279,7 +280,8 @@ class CliprApp(QObject):
             return
         self.panel.hide()
         self.region_frame.hide()               # рамка не должна мешать выбору
-        selector = RegionSelector()
+        # Своя область открывается с ручками — её правят, а не рисуют заново.
+        selector = RegionSelector(self.region_rect if self._has_custom_region() else None)
         self._selector = selector             # держим ссылку до закрытия окна
 
         def on_selected(rect: QRect) -> None:
@@ -452,12 +454,28 @@ class CliprApp(QObject):
                                 on_click=action, tag="update" if action else "")
 
     def _on_exported(self, path: str, size: int) -> None:
-        """GIF уже в буфере обмена — сказать об этом там, где человек смотрит,
-        и показать, что именно скопировано. Клик — файл в Проводнике."""
+        """Результат уже в буфере обмена — сказать об этом там, где человек
+        смотрит, и показать, что именно скопировано. Клик — файл в Проводнике."""
         from .ui.clipboard import reveal
+        video = path.lower().endswith(".mp4")
         self.toast.show_message(
-            tr("toast.copied"), tr("toast.copied_sub", size=size_text(size)),
-            on_click=lambda: reveal(path), tag="copied", thumbnail=path)
+            tr("toast.video_copied" if video else "toast.copied"),
+            tr("toast.copied_sub", size=size_text(size)),
+            on_click=lambda: reveal(path), tag="copied",
+            thumbnail=self._video_thumbnail(path) if video else path)
+
+    def _video_thumbnail(self, path: str) -> str | None:
+        """Первый кадр MP4 картинкой: Qt читает из видео кадр только плеером."""
+        exe = ffmpeg_path()
+        if not exe:
+            return None
+        thumb = self.settings.ensure_temp_dir() / "thumbnail.png"
+        try:
+            run_hidden([exe, "-hide_banner", "-loglevel", "error", "-i", path,
+                        "-frames:v", "1", "-vf", "scale=320:-2", "-y", str(thumb)], timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return str(thumb) if thumb.exists() else None
 
     def restart_and_update(self) -> None:
         if not self.updates.ready_version():
@@ -520,8 +538,11 @@ class CliprApp(QObject):
             # Сырая запись лежит во временной папке — переносим её к результатам,
             # иначе уборка temp однажды её унесёт.
             try:
-                target = self.settings.ensure_output_dir() / f"{work_dir.name}.mp4"
-                if source.exists() and not target.exists():
+                folder = self.settings.ensure_output_dir()
+                target = folder / f"{work_dir.name}.mp4"
+                if target.exists():      # имя занял экспорт видео из редактора
+                    target = unique_path(folder / f"{work_dir.name}_source.mp4")
+                if source.exists():
                     shutil.move(str(source), str(target))
             except OSError:
                 pass

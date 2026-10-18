@@ -15,6 +15,19 @@ CONFIG_PATH = Path(app_dir()) / "settings.json"
 # Уровень сжатия -> gifsicle --lossy. 0 — gifsicle не запускаем вовсе.
 COMPRESS_LOSSY = {"none": 0, "light": 30, "strong": 80}
 
+# Задержка кадра в GIF — в сотых долях секунды, и браузеры растягивают задержку
+# меньше 2/100 до 10/100. На 60 кадрах/с половина задержек — 1/100, и GIF шёл бы
+# рывками в разы медленнее. 50 — предел, который GIF показывает честно.
+GIF_MAX_FPS = 50
+
+# Встроенные пресеты экспорта: ключ имени в i18n, размер %, кадры/с, сжатие.
+BUILTIN_PRESETS = [
+    ("preset.small", 50, 10, "strong"),
+    ("preset.chat", 75, 15, "light"),
+    ("preset.quality", 100, 30, "none"),
+    ("preset.smooth", 100, 60, "none"),
+]
+
 
 def scaled_size(width: int, height: int, percent: int) -> tuple[int, int]:
     """Размер GIF после уменьшения на `percent` %, округлённый до чётного —
@@ -57,6 +70,8 @@ class Settings:
     # FFmpeg уже пишет только изменившиеся прямоугольники (замер: −2 %), весь
     # выигрыш даёт --lossy, а он же и портит картинку. Поэтому по умолчанию выкл.
     gif_compress: str = "none"       # none | light | strong
+    # Свои пресеты экспорта: [{"name", "scale", "fps", "compress"}, ...]
+    export_presets: list[dict] = field(default_factory=list)
 
     # приложение
     hotkey_start_stop: str = "Ctrl+Alt+R"
@@ -86,6 +101,14 @@ class Settings:
         settings.gif_scale = max(10, min(100, int(settings.gif_scale)))
         if settings.gif_compress not in COMPRESS_LOSSY:
             settings.gif_compress = "none"
+        settings.export_presets = [
+            {"name": p["name"].strip(), "scale": max(10, min(100, p["scale"])),
+             "fps": p["fps"], "compress": p["compress"]}
+            for p in settings.export_presets if isinstance(p, dict)
+            and isinstance(p.get("name"), str) and p["name"].strip()
+            and isinstance(p.get("scale"), int) and isinstance(p.get("fps"), int)
+            and p.get("compress") in COMPRESS_LOSSY
+        ] if isinstance(settings.export_presets, list) else []
         geometry = settings.editor_geometry
         if not (isinstance(geometry, list) and len(geometry) == 4
                 and all(isinstance(v, int) for v in geometry)):

@@ -30,13 +30,18 @@ Clipr lives in the tray, next to the clock. A small panel sits at the bottom of
 the screen:
 
 1. **Pick an area** — the corners button. Drag a frame, or just click to take the
-   whole monitor. The × next to the area size on the panel goes back to full screen.
+   whole monitor. Open it again to adjust the area: drag its edges, corners or the
+   whole frame. The × next to the area size on the panel goes back to full screen.
 2. **Record** — the red button. Pause and stop are on the same panel.
 3. **Edit** — after you stop, an editor opens. Drag the handles on the timeline
-   to trim, drag over the video to crop.
+   to trim (the video shows the frame under the handle), drag over the video to
+   crop; the crop's edges and corners can be dragged too. The mouse wheel zooms the preview toward the cursor; the middle button
+   pans it.
 4. **Export GIF** (or `Enter`). The GIF is saved and **copied to the clipboard as
    a file**, so `Ctrl + V` in Telegram, Discord, Slack or Explorer pastes the GIF
    itself. A small notification confirms it; click it to see the file.
+   **Export Video** (`Ctrl + Enter`) does the same with an MP4 — same trim, crop,
+   size and FPS.
 
 The panel never shows up in your recordings, even though it stays on screen.
 
@@ -52,6 +57,10 @@ In the editor: `Space` play/pause, `←` `→` one frame, `R` reset crop, `Esc` 
 **Making the GIF smaller.** In the editor, lower **Size** (a share of the
 recorded area: 50 % of 752×648 is 376×324) or **FPS**. **Compression** shrinks
 the file further but adds a bit of noise to flat colors, so it's off by default.
+A GIF can't go above 50 FPS — at 60 the video keeps 60 and the GIF gets 50.
+
+**Presets.** The button left of **Size** sets size, FPS and compression in one
+click. To keep your own, set the values and choose **Save Current as Preset…**.
 
 Everything else — shortcuts, folders, language, launch with Windows, start
 minimized — is in **Settings** (the sliders button on the panel or the tray menu).
@@ -60,7 +69,8 @@ minimized — is in **Settings** (the sliders button on the panel or the tray me
 
 **Where are my GIFs?** In `Videos\Clipr`. You can change the folder in
 Settings → Files. The source video can be kept next to the GIF (on by default),
-so you can re-export it later with other settings.
+so you can re-export it later with other settings. If you also exported a video,
+the source gets `_source` in its name.
 
 **The panel disappeared.** Click the tray icon or press `Ctrl + Alt + X`. It
 always comes back to the bottom center of the main screen.

@@ -1,4 +1,4 @@
-"""FFmpeg plumbing: screen capture to an intermediate MP4, then MP4 to GIF.
+"""FFmpeg plumbing: screen capture to an intermediate MP4, then MP4 to GIF or MP4.
 
 Recording writes H.264 first and only converts to GIF after trim/crop, so the
 expensive palette work happens once, on the final framing.
@@ -15,10 +15,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QThread, Signal
 
-from .config import COMPRESS_LOSSY
+from .config import COMPRESS_LOSSY, GIF_MAX_FPS
 from .i18n import tr
 
 from .tools import (  # noqa: F401  (re-exported: the UI imports them from here)
+    CREATE_NO_WINDOW,
     ffmpeg_path,
     ffprobe_path,
     gifsicle_path,
@@ -275,6 +276,11 @@ class Recorder(QObject):
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-crf", "18",
+            # Ключевой кадр раз в секунду. По умолчанию x264 ставит их раз в
+            # 250 кадров, и перемотка в редакторе на паузе успевала показать
+            # лишь каждый восьмой кадр — декодеру приходилось идти от далёкого
+            # ключевого. Файл от этого почти не растёт.
+            "-g", str(self.settings.capture_fps),
             "-pix_fmt", "yuv420p",
             "-y", str(target),
         ]
@@ -362,6 +368,28 @@ class Recorder(QObject):
         self.finished.emit(str(final))
 
 
+def edit_filters(crop: Region | None, fps: int, percent: int) -> str:
+    """Кадрирование, частота и масштаб — общие для GIF и видео, чтобы оба
+    экспорта давали ровно то, что показывает редактор."""
+    chain = []
+    if crop:
+        chain.append(f"crop={crop.width}:{crop.height}:{crop.x}:{crop.y}")
+    chain.append(f"fps={fps}")
+    if percent < 100:
+        # Та же формула, что у config.scaled_size: доля от кадра, вниз до
+        # чётного — редактор заранее показывает ровно этот размер.
+        f = percent / 100.0
+        chain.append(f"scale=trunc(iw*{f}/2)*2:trunc(ih*{f}/2)*2:flags=lanczos")
+    return ",".join(chain)
+
+
+def trim_args(start: float, end: float | None) -> list[str]:
+    args = ["-ss", f"{start:.3f}"]
+    if end is not None and end > start:
+        args += ["-t", f"{end - start:.3f}"]
+    return args
+
+
 class GifExporter(QThread):
     """Two-pass palette GIF export; gifsicle --lossy only when compression is on."""
 
@@ -377,6 +405,7 @@ class GifExporter(QThread):
         start: float = 0.0,
         end: float | None = None,
         crop: Region | None = None,
+        fps: int | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -386,26 +415,13 @@ class GifExporter(QThread):
         self.start_time = start
         self.end_time = end
         self.crop = crop
+        self.fps = min(fps or settings.gif_fps, GIF_MAX_FPS)
 
     def _filters(self) -> str:
-        chain = []
-        if self.crop:
-            c = self.crop
-            chain.append(f"crop={c.width}:{c.height}:{c.x}:{c.y}")
-        chain.append(f"fps={self.settings.gif_fps}")
-        percent = self.settings.gif_scale
-        if percent < 100:
-            # Та же формула, что у config.scaled_size: доля от кадра, вниз до
-            # чётного — редактор заранее показывает ровно этот размер.
-            f = percent / 100.0
-            chain.append(f"scale=trunc(iw*{f}/2)*2:trunc(ih*{f}/2)*2:flags=lanczos")
-        return ",".join(chain)
+        return edit_filters(self.crop, self.fps, self.settings.gif_scale)
 
     def _trim_args(self) -> list[str]:
-        args = ["-ss", f"{self.start_time:.3f}"]
-        if self.end_time is not None and self.end_time > self.start_time:
-            args += ["-t", f"{self.end_time - self.start_time:.3f}"]
-        return args
+        return trim_args(self.start_time, self.end_time)
 
     def run(self) -> None:  # noqa: D102 (QThread entry point)
         exe = ffmpeg_path()
@@ -466,3 +482,71 @@ class GifExporter(QThread):
             self.failed.emit(str(exc))
         finally:
             palette.unlink(missing_ok=True)
+
+
+class VideoExporter(QThread):
+    """Тот же монтаж, что у GIF (обрезка, кадр, размер, частота), но в MP4 H.264."""
+
+    progress = Signal(int, str)  # 0..100, stage label
+    done = Signal(str, int)  # path, size in bytes
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        source: Path,
+        target: Path,
+        start: float = 0.0,
+        end: float | None = None,
+        crop: Region | None = None,
+        fps: int = 30,
+        scale: int = 100,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.source = Path(source)
+        self.target = Path(target)
+        self.start_time = start
+        self.end_time = end
+        self.crop = crop
+        self.fps = fps
+        self.scale = scale
+
+    def run(self) -> None:  # noqa: D102 (QThread entry point)
+        exe = ffmpeg_path()
+        if not exe:
+            self.failed.emit(tr("rec.no_ffmpeg"))
+            return
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        length = (self.end_time or 0.0) - self.start_time
+        args = [
+            exe, "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
+            *trim_args(self.start_time, self.end_time), "-i", str(self.source),
+            "-vf", edit_filters(self.crop, self.fps, self.scale),
+            "-an",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",   # мессенджеры начинают показ до конца загрузки
+            "-y", str(self.target),
+        ]
+        self.progress.emit(5, tr("video.building"))
+        try:
+            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, creationflags=CREATE_NO_WINDOW)
+            assert process.stdout is not None
+            # Прогресс — по out_time из -progress: длинная запись кодируется
+            # заметное время, и пустая полоса выглядела бы зависанием.
+            for line in process.stdout:
+                key, _, value = line.strip().partition("=")
+                if key == "out_time_us" and length > 0 and value.isdigit():
+                    share = int(value) / 1e6 / length
+                    self.progress.emit(5 + int(90 * min(share, 1.0)), tr("video.building"))
+            error = process.stderr.read() if process.stderr else ""
+            if process.wait(timeout=60) != 0 or not self.target.exists():
+                self.failed.emit(error.strip() or tr("video.failed"))
+                return
+            self.progress.emit(100, tr("gif.done"))
+            self.done.emit(str(self.target), self.target.stat().st_size)
+        except subprocess.TimeoutExpired:
+            self.failed.emit(tr("gif.timeout"))
+        except OSError as exc:
+            self.failed.emit(str(exc))

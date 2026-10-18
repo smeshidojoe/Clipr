@@ -48,6 +48,7 @@ STRINGS = {
     "notify.copied":     {"en": "GIF copied — paste it with Ctrl+V.",
                           "ru": "GIF скопирован — вставьте его через Ctrl+V."},
     "toast.copied":      {"en": "GIF copied to clipboard", "ru": "GIF скопирован в буфер"},
+    "toast.video_copied": {"en": "Video copied to clipboard", "ru": "Видео скопировано в буфер"},
     "toast.copied_sub":  {"en": "Paste with Ctrl+V · {size} · click to show",
                           "ru": "Вставьте через Ctrl+V · {size} · клик — показать"},
     "size.kb":           {"en": "{value} KB", "ru": "{value} КБ"},
@@ -77,6 +78,10 @@ STRINGS = {
     "select.hint": {"en": "Drag to select an area  ·  Click for the whole screen  ·  "
                           "Esc to cancel",
                     "ru": "Протяните рамку  ·  Клик — весь экран  ·  Esc — отмена"},
+    "select.adjust_hint": {"en": "Drag the edges or the frame  ·  Enter to keep  ·  "
+                                 "Drag outside for a new area  ·  Esc to cancel",
+                           "ru": "Тяните края или рамку  ·  Enter — оставить  ·  "
+                                 "Мимо рамки — новая область  ·  Esc — отмена"},
 
     # --- запись и экспорт ---------------------------------------------------- #
     "rec.no_ffmpeg":     {"en": "FFmpeg not found. Install it in Settings.",
@@ -91,6 +96,8 @@ STRINGS = {
     "gif.building":      {"en": "Building GIF…", "ru": "Собираем GIF…"},
     "gif.compressing":   {"en": "Compressing…", "ru": "Сжимаем…"},
     "gif.done":          {"en": "Done", "ru": "Готово"},
+    "video.building":    {"en": "Encoding video…", "ru": "Собираем видео…"},
+    "video.failed":      {"en": "Video encoding failed.", "ru": "Не удалось собрать видео."},
     "gif.palettegen_failed": {"en": "palettegen failed.", "ru": "Ошибка palettegen."},
     "gif.paletteuse_failed": {"en": "paletteuse failed.", "ru": "Ошибка paletteuse."},
     "gif.timeout":       {"en": "FFmpeg didn't respond in time.",
@@ -115,11 +122,34 @@ STRINGS = {
     "editor.export_tip": {"en": "Build the GIF and copy it (Enter)",
                           "ru": "Собрать GIF и скопировать (Enter)"},
     "editor.exporting":  {"en": "Exporting…", "ru": "Собираем…"},
+    "editor.export_video": {"en": "Export Video", "ru": "Экспорт видео"},
+    "editor.export_video_tip": {"en": "Save MP4 with the same trim, crop, size and FPS "
+                                      "and copy it (Ctrl+Enter)",
+                                "ru": "Сохранить MP4 с той же обрезкой, кадром, размером "
+                                      "и частотой и скопировать (Ctrl+Enter)"},
+    "editor.fps_split":  {"en": "GIF {gif} · video {video}", "ru": "GIF {gif} · видео {video}"},
+    "editor.fps_gif_cap": {"en": "GIF is limited to 50 FPS — the video keeps {video}",
+                           "ru": "GIF ограничен 50 кадрами/с — видео сохранит {video}"},
+    "editor.zoom_tip":   {"en": "Wheel — zoom, middle button — pan",
+                          "ru": "Колесо — масштаб, средняя кнопка — сдвиг"},
+    "editor.preset":     {"en": "Preset", "ru": "Пресет"},
+    "editor.preset_custom": {"en": "Custom", "ru": "Свой"},
+    "editor.preset_save": {"en": "Save Current as Preset…",
+                           "ru": "Сохранить текущие как пресет…"},
+    "editor.preset_delete": {"en": "Delete Preset", "ru": "Удалить пресет"},
+    "editor.preset_name": {"en": "Preset name", "ru": "Название пресета"},
+    "editor.preset_add": {"en": "Save", "ru": "Сохранить"},
+    "editor.preset_tip": {"en": "Size, FPS and compression in one click",
+                          "ru": "Размер, кадры/с и сжатие в один клик"},
+    "preset.small":      {"en": "Small", "ru": "Маленький"},
+    "preset.chat":       {"en": "For chat", "ru": "Для чата"},
+    "preset.quality":    {"en": "Quality", "ru": "Качество"},
+    "preset.smooth":     {"en": "Smooth", "ru": "Плавный"},
     "editor.copied":     {"en": "Copied", "ru": "Скопировано"},
     "editor.selected":   {"en": "{position} / selected {length}",
                           "ru": "{position} / выбрано {length}"},
-    "editor.result":     {"en": "output: {w}×{h} · {seconds:.1f} s",
-                          "ru": "итог: {w}×{h} · {seconds:.1f} с"},
+    "editor.result":     {"en": "output: {w}×{h} · {seconds:.1f} s · {fps} FPS",
+                          "ru": "итог: {w}×{h} · {seconds:.1f} с · {fps} к/с"},
     "editor.saved":      {"en": "Saved {name} · {size} · in the clipboard",
                           "ru": "Сохранено {name} · {size} · в буфере обмена"},
     "editor.preview_error": {"en": "Preview error: {message}",
@@ -161,8 +191,10 @@ STRINGS = {
     "gif.size_note":     {"en": "Share of the selected area: {w}×{h} → {ow}×{oh}",
                           "ru": "Доля от выделенной области: {w}×{h} → {ow}×{oh}"},
     "gif.fps":           {"en": "Frames per second", "ru": "Кадры в секунду"},
-    "gif.fps_note":      {"en": "Fewer frames, smaller file; 15 is plenty for UI",
-                          "ru": "Меньше кадров — меньше файл; 15 хватает для интерфейсов"},
+    "gif.fps_note":      {"en": "Fewer frames, smaller file; 15 is plenty for UI. "
+                                "GIF tops out at 50 — 60 is for video",
+                          "ru": "Меньше кадров — меньше файл; 15 хватает для интерфейсов. "
+                                "GIF больше 50 не умеет — 60 для видео"},
     "gif.dither":        {"en": "Color dithering", "ru": "Сглаживание цветов"},
     "gif.dither_note":   {"en": "GIF has only 256 colors. Pattern is cleaner on UI, "
                                 "Diffusion on gradients and photos",
